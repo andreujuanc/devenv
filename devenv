@@ -315,6 +315,45 @@ yaml_single_quote() {
     printf "%s" "$1" | sed "s/'/''/g"
 }
 
+mount_spec_value() {
+    local mount_spec="$1"
+    local key_name="$2"
+    local segment key value
+
+    IFS=',' read -r -a mount_segments <<< "$mount_spec"
+    for segment in "${mount_segments[@]}"; do
+        key="${segment%%=*}"
+        value="${segment#*=}"
+        key="${key## }"
+        key="${key%% }"
+        if [[ "$key" == "$key_name" ]]; then
+            printf '%s\n' "$value"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+should_skip_mount_spec() {
+    local mount_spec="$1"
+    local mount_type mount_source
+
+    mount_type="$(mount_spec_value "$mount_spec" type || true)"
+    mount_source="$(mount_spec_value "$mount_spec" source || mount_spec_value "$mount_spec" src || true)"
+
+    if [[ "$mount_type" != "bind" || -z "$mount_source" ]]; then
+        return 1
+    fi
+
+    if [[ -e "$mount_source" || -S "$mount_source" ]]; then
+        return 1
+    fi
+
+    print_warning "Skipping bind mount because the source path does not exist on the host: $mount_source"
+    return 0
+}
+
 expand_devcontainer_value() {
     local value="$1"
     local prefix variable_name has_default default_value suffix replacement
@@ -579,6 +618,9 @@ resolve_dockerfile_settings() {
     while IFS= read -r mount_spec; do
         [[ -n "$mount_spec" ]] || continue
         mount_spec="$(expand_devcontainer_value "$mount_spec")"
+        if should_skip_mount_spec "$mount_spec"; then
+            continue
+        fi
         MOUNT_ARGS+=("--mount=$mount_spec")
     done < <(json_query_lines '.mounts // [] | .[]')
 }
