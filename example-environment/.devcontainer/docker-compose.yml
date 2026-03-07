@@ -1,0 +1,25 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ..:/workspace:cached
+
+    command: sleep infinity
+    networks:
+      - development
+
+  postgres:
+    image: "postgres" # use latest official postgres version
+    # ports:
+    #   - "5432:5432"
+    networks:
+      - development
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=postgres
+
+networks:
+  development:

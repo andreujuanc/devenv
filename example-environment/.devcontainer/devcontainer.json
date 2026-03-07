@@ -1,0 +1,8 @@
+{
+	"name": "devenv-example",
+	"service": "app",
+    // TESTING
+	"dockerComposeFile": "docker-compose.yml",
+	"workspaceFolder": "/workspace",
+	"remoteUser": "node"
+}
