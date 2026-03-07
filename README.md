@@ -21,6 +21,7 @@ It currently supports:
 - stable per-repo container and image naming for Dockerfile-based repos
 - `initializeCommand` on the host
 - `onCreateCommand`, `updateContentCommand`, `postCreateCommand`, `postStartCommand`, and `postAttachCommand` when they are strings, arrays, or objects
+- `forwardPorts` publishing to `127.0.0.1` for the primary service/container
 - shell workflows that either keep the environment running or remove it on exit with `--rm`
 - host tmux helpers for terminal-centric workflows
 - optional helper commands for host-side and container-side tooling
@@ -31,7 +32,6 @@ It does not yet support:
 - image-only devcontainer definitions
 - Dev Container Features
 - editor-specific `customizations`
-- automatic `forwardPorts`
 - full Dev Container spec parity
 
 ## Host Requirements
@@ -117,6 +117,7 @@ devenv uninstall [--prefix PATH]
 - `devenv --rm` tears the stack down after `open`, `shell`, `exec`, or `tool` exits.
 - `devenv shell` attaches to the configured service without tearing the stack down by default.
 - `devenv exec -- <cmd>` starts the environment if needed, waits until the target container is ready, and then runs the command inside it.
+- `forwardPorts` is published on the host as `127.0.0.1:<port>` for the primary service/container.
 - `devenv host-tmux` creates or attaches to a host tmux session named after the repo and starts a `devenv shell` in its first window.
 - `devenv tool ...` is optional and only works when the repo image already provides that tool.
 
@@ -286,7 +287,7 @@ If you want reproducible repo tooling, put it in the image. If you want personal
 ## Notes
 
 - `--rm` does not affect `host-tmux`; it only changes whether the stack is removed after `open`, `shell`, `exec`, or `tool` exits.
-- `forwardPorts` is metadata only in this wrapper. Publish ports in compose or use your editor's own forwarding.
+- `forwardPorts` currently supports numeric ports and `<service>:<port>` entries for the primary service. They are published on `127.0.0.1` rather than all interfaces.
 - Editor-specific `customizations` are ignored on purpose.
 
 The next natural expansions are broader Dev Container spec support, better state handling, and richer helper workflows.

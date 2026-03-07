@@ -2,6 +2,8 @@
   "name": "devenv-dockerfile-example",
   "dockerFile": "Dockerfile",
   "context": "..",
+  "postStartCommand": "sh -lc 'nohup node src/index.js >/tmp/devenv-example-http.log 2>&1 </dev/null &'",
   "workspaceFolder": "/workspace",
-  "remoteUser": "node"
+  "remoteUser": "node",
+  "forwardPorts": [8000]
 }

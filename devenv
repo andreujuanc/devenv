@@ -54,6 +54,8 @@ declare -a RUN_ARGS=()
 declare -a CONTAINER_ENV_ARGS=()
 declare -a REMOTE_ENV_ARGS=()
 declare -a MOUNT_ARGS=()
+declare -a FORWARD_PORTS=()
+declare -a PORT_ARGS=()
 
 cleanup() {
     if [[ -n "$DEVCONTAINER_CACHE" && -f "$DEVCONTAINER_CACHE" ]]; then
@@ -394,9 +396,90 @@ load_remote_env_args() {
     done < <(json_query_compact_lines '(.remoteEnv // {}) | to_entries[]')
 }
 
-configure_automatic_ssh_agent_forwarding() {
-    local quoted_service quoted_source quoted_target
+load_forward_ports() {
+    local port_entry target_name target_port
 
+    FORWARD_PORTS=()
+    while IFS= read -r port_entry; do
+        [[ -n "$port_entry" ]] || continue
+
+        if [[ "$port_entry" =~ ^[0-9]+$ ]]; then
+            FORWARD_PORTS+=("$port_entry")
+            continue
+        fi
+
+        if [[ "$port_entry" =~ ^([^:]+):([0-9]+)$ ]]; then
+            target_name="${BASH_REMATCH[1]}"
+            target_port="${BASH_REMATCH[2]}"
+            if [[ "$target_name" == "$SERVICE_NAME" ]]; then
+                FORWARD_PORTS+=("$target_port")
+            else
+                print_warning "Skipping forwardPorts entry '$port_entry' because it targets '$target_name'. devenv currently publishes ports only for the primary service '$SERVICE_NAME'."
+            fi
+            continue
+        fi
+
+        print_warning "Skipping unsupported forwardPorts entry '$port_entry'. devenv currently supports numeric ports and '<service>:<port>' for the primary service."
+    done < <(json_query_lines '.forwardPorts // [] | if type == "array" then .[] else . end | tostring')
+}
+
+write_compose_runtime_override() {
+    local quoted_service quoted_source quoted_target port
+
+    if [[ "$SCENARIO" != "compose" ]]; then
+        return
+    fi
+
+    if [[ $AUTO_SSH_AGENT_FORWARDING -eq 0 && ${#FORWARD_PORTS[@]} -eq 0 ]]; then
+        return
+    fi
+
+    quoted_service="$(yaml_single_quote "$SERVICE_NAME")"
+    COMPOSE_RUNTIME_OVERRIDE="$PROJECT_STATE_DIR/compose.runtime.override.yml"
+
+    {
+        printf 'services:\n'
+        printf "  '%s':\n" "$quoted_service"
+
+        if [[ $AUTO_SSH_AGENT_FORWARDING -eq 1 ]]; then
+            quoted_source="$(yaml_single_quote "$AUTO_SSH_AGENT_SOURCE")"
+            quoted_target="$(yaml_single_quote "$AUTO_SSH_AGENT_TARGET")"
+            printf '    environment:\n'
+            printf "      SSH_AUTH_SOCK: '%s'\n" "$quoted_target"
+            printf '    volumes:\n'
+            printf '      - type: bind\n'
+            printf "        source: '%s'\n" "$quoted_source"
+            printf "        target: '%s'\n" "$quoted_target"
+            printf '        read_only: true\n'
+        fi
+
+        if [[ ${#FORWARD_PORTS[@]} -gt 0 ]]; then
+            printf '    ports:\n'
+            for port in "${FORWARD_PORTS[@]}"; do
+                printf "      - '127.0.0.1:%s:%s'\n" "$port" "$port"
+            done
+        fi
+    } > "$COMPOSE_RUNTIME_OVERRIDE"
+
+    COMPOSE_ARGS+=(-f "$COMPOSE_RUNTIME_OVERRIDE")
+}
+
+configure_forward_ports() {
+    local port
+
+    PORT_ARGS=()
+    if [[ ${#FORWARD_PORTS[@]} -eq 0 ]]; then
+        return
+    fi
+
+    if [[ "$SCENARIO" == "dockerfile" ]]; then
+        for port in "${FORWARD_PORTS[@]}"; do
+            PORT_ARGS+=(-p "127.0.0.1:${port}:${port}")
+        done
+    fi
+}
+
+configure_automatic_ssh_agent_forwarding() {
     AUTO_SSH_AGENT_FORWARDING=0
     AUTO_SSH_AGENT_SOURCE=""
     COMPOSE_RUNTIME_OVERRIDE=""
@@ -417,26 +500,7 @@ configure_automatic_ssh_agent_forwarding() {
     AUTO_SSH_AGENT_SOURCE="$SSH_AUTH_SOCK"
     REMOTE_ENV_ARGS+=(-e "SSH_AUTH_SOCK=$AUTO_SSH_AGENT_TARGET")
 
-    if [[ "$SCENARIO" == "compose" ]]; then
-        quoted_service="$(yaml_single_quote "$SERVICE_NAME")"
-        quoted_source="$(yaml_single_quote "$AUTO_SSH_AGENT_SOURCE")"
-        quoted_target="$(yaml_single_quote "$AUTO_SSH_AGENT_TARGET")"
-        COMPOSE_RUNTIME_OVERRIDE="$PROJECT_STATE_DIR/compose.ssh-agent.override.yml"
-
-        cat > "$COMPOSE_RUNTIME_OVERRIDE" <<EOF
-services:
-  '$quoted_service':
-    environment:
-      SSH_AUTH_SOCK: '$quoted_target'
-    volumes:
-      - type: bind
-        source: '$quoted_source'
-        target: '$quoted_target'
-        read_only: true
-EOF
-
-        COMPOSE_ARGS+=(-f "$COMPOSE_RUNTIME_OVERRIDE")
-    else
+        if [[ "$SCENARIO" == "dockerfile" ]]; then
         MOUNT_ARGS+=("--mount=type=bind,source=$AUTO_SSH_AGENT_SOURCE,target=$AUTO_SSH_AGENT_TARGET,readonly")
     fi
 }
@@ -682,6 +746,7 @@ load_workspace_context() {
     PROJECT_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/devenv/$PROJECT_HASH"
     mkdir -p "$PROJECT_STATE_DIR"
     load_remote_env_args
+    load_forward_ports
 
     if [[ "$SCENARIO" == "compose" ]]; then
         resolve_compose_files
@@ -693,6 +758,8 @@ load_workspace_context() {
     fi
 
     configure_automatic_ssh_agent_forwarding
+    configure_forward_ports
+    write_compose_runtime_override
 }
 
 emit_spec_warnings() {
@@ -702,10 +769,6 @@ emit_spec_warnings() {
 
     if json_has_value "customizations"; then
         print_warning "Editor customizations are ignored by this editor-agnostic wrapper."
-    fi
-
-    if json_has_value "forwardPorts"; then
-        print_warning "forwardPorts is metadata only here. Publish ports in compose or rely on your editor to forward them."
     fi
 
     if json_has_value "remoteEnv"; then
@@ -1584,6 +1647,7 @@ start_stack() {
                 --label "devenv.project_root=$PROJECT_ROOT" \
                 -w "$WORKSPACE_FOLDER" \
                 -v "$PROJECT_ROOT:$WORKSPACE_FOLDER" \
+                "${PORT_ARGS[@]}" \
                 "${MOUNT_ARGS[@]}" \
                 "${CONTAINER_ENV_ARGS[@]}" \
                 "${RUN_ARGS[@]}" \
@@ -1825,6 +1889,7 @@ Primary service:  $SERVICE_NAME
 Remote user:      ${REMOTE_USER:-<container default>}
 Workspace folder: $WORKSPACE_FOLDER
 SSH agent:        $(if [[ $AUTO_SSH_AGENT_FORWARDING -eq 1 ]]; then printf 'auto -> %s' "$AUTO_SSH_AGENT_TARGET"; else printf 'disabled'; fi)
+Forward ports:    $(if [[ ${#FORWARD_PORTS[@]} -gt 0 ]]; then printf '%s' "${FORWARD_PORTS[*]}"; else printf 'none'; fi)
 EOF
 
     if [[ "$SCENARIO" == "compose" ]]; then

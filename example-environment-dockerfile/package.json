@@ -1,7 +1,7 @@
 {
   "name": "workspace",
   "version": "1.0.0",
-  "description": "",
+  "description": "Simple HTML server for testing forwarded ports",
   "main": "index.js",
   "scripts": {
     "dev": "node src/index.js"
