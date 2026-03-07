@@ -35,12 +35,19 @@ PROJECT_STATE_DIR=""
 TOOL_NAME=""
 SUBCOMMAND=""
 PRINT_ONLY=0
+IMAGE_NAME=""
+CONTAINER_NAME=""
+DOCKERFILE_PATH=""
+BUILD_CONTEXT_PATH=""
 
 declare -a COMPOSE_FILES=()
 declare -a COMPOSE_ARGS=()
 declare -a RUN_SERVICES=()
 declare -a EXEC_ARGS=()
 declare -a TOOL_ARGS=()
+declare -a BUILD_ARGS=()
+declare -a RUN_ARGS=()
+declare -a CONTAINER_ENV_ARGS=()
 
 cleanup() {
     if [[ -n "$DEVCONTAINER_CACHE" && -f "$DEVCONTAINER_CACHE" ]]; then
@@ -124,7 +131,7 @@ Options:
 
 Notes:
     - v1 is intentionally shell-only and does not use the devcontainer CLI.
-    - v1 currently supports repos whose .devcontainer config defines dockerComposeFile.
+    - v1 supports compose-backed devcontainers and Dockerfile-based devcontainers.
     - Editor customizations, features, and automatic port forwarding are not applied by this wrapper.
     - `devenv tool ...` is optional and only works when the repo image provides those binaries.
     - `devenv host-tmux` uses tmux on the host and keeps all SDKs and app commands in containers.
@@ -407,6 +414,43 @@ resolve_compose_files() {
     done
 }
 
+resolve_dockerfile_settings() {
+    local dockerfile_entry context_entry resolved_path
+
+    dockerfile_entry="$(json_query_optional '.dockerFile // .build.dockerfile')"
+    [[ -n "$dockerfile_entry" ]] || die "The devcontainer configuration is missing dockerFile/build.dockerfile in $DEVCONTAINER_JSON"
+
+    if [[ "$dockerfile_entry" = /* ]]; then
+        resolved_path="$dockerfile_entry"
+    else
+        resolved_path="$DEVCONTAINER_DIR/$dockerfile_entry"
+    fi
+    DOCKERFILE_PATH="$(absolute_file_path "$resolved_path")"
+    [[ -f "$DOCKERFILE_PATH" ]] || die "Dockerfile '$DOCKERFILE_PATH' does not exist"
+
+    context_entry="$(json_query_optional '.context // .build.context')"
+    if [[ -z "$context_entry" ]]; then
+        context_entry="."
+    fi
+
+    if [[ "$context_entry" = /* ]]; then
+        resolved_path="$context_entry"
+    else
+        resolved_path="$DEVCONTAINER_DIR/$context_entry"
+    fi
+    BUILD_CONTEXT_PATH="$(absolute_directory_path "$resolved_path")"
+    [[ -d "$BUILD_CONTEXT_PATH" ]] || die "Build context '$BUILD_CONTEXT_PATH' does not exist"
+
+    BUILD_ARGS=()
+    mapfile -t BUILD_ARGS < <(json_query_lines '(.args // .build.args // {}) | to_entries[] | "--build-arg=\(.key)=\(.value|tostring)"')
+
+    RUN_ARGS=()
+    mapfile -t RUN_ARGS < <(json_query_lines '.runArgs // [] | .[]')
+
+    CONTAINER_ENV_ARGS=()
+    mapfile -t CONTAINER_ENV_ARGS < <(json_query_lines '(.containerEnv // {}) | to_entries[] | "-e" , "\(.key)=\(.value|tostring)"')
+}
+
 load_run_services() {
     mapfile -t RUN_SERVICES < <(json_query_lines '.runServices // [] | .[]')
 
@@ -433,8 +477,10 @@ load_workspace_context() {
 
     if json_has_value "dockerComposeFile"; then
         SCENARIO="compose"
+    elif [[ -n "$(json_query_optional '.dockerFile // .build.dockerfile')" ]]; then
+        SCENARIO="dockerfile"
     else
-        die "Unsupported devcontainer configuration in $DEVCONTAINER_JSON. v1 currently supports only dockerComposeFile-based repos."
+        die "Unsupported devcontainer configuration in $DEVCONTAINER_JSON. v1 currently supports dockerComposeFile-based repos and Dockerfile-based repos."
     fi
 
     DISPLAY_NAME="$(json_query_optional '.name')"
@@ -442,9 +488,13 @@ load_workspace_context() {
         DISPLAY_NAME="$(basename "$PROJECT_ROOT")"
     fi
 
-    SERVICE_NAME="$(json_query_required '.service' 'service')"
-    if [[ -n "$SERVICE_OVERRIDE" ]]; then
-        SERVICE_NAME="$SERVICE_OVERRIDE"
+    if [[ "$SCENARIO" == "compose" ]]; then
+        SERVICE_NAME="$(json_query_required '.service' 'service')"
+        if [[ -n "$SERVICE_OVERRIDE" ]]; then
+            SERVICE_NAME="$SERVICE_OVERRIDE"
+        fi
+    else
+        SERVICE_NAME="${SERVICE_OVERRIDE:-container}"
     fi
 
     WORKSPACE_FOLDER="$(json_query_optional '.workspaceFolder')"
@@ -458,8 +508,14 @@ load_workspace_context() {
     PROJECT_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/devenv/$PROJECT_HASH"
     mkdir -p "$PROJECT_STATE_DIR"
 
-    resolve_compose_files
-    load_run_services
+    if [[ "$SCENARIO" == "compose" ]]; then
+        resolve_compose_files
+        load_run_services
+    else
+        IMAGE_NAME="$PROJECT_NAME-devcontainer:latest"
+        CONTAINER_NAME="$PROJECT_NAME-devcontainer"
+        resolve_dockerfile_settings
+    fi
 }
 
 emit_spec_warnings() {
@@ -474,12 +530,23 @@ emit_spec_warnings() {
     if json_has_value "forwardPorts"; then
         print_warning "forwardPorts is metadata only here. Publish ports in compose or rely on your editor to forward them."
     fi
+
+    if [[ "$SCENARIO" == "dockerfile" ]] && json_has_value "mounts"; then
+        print_warning "Additional mounts are not applied for Dockerfile-based repos yet. devenv only binds the workspace root."
+    fi
 }
 
 require_compose() {
     require_command docker "Install Docker and ensure it is on your PATH."
     if ! docker compose version >/dev/null 2>&1; then
         die "Docker Compose v2 is required. Ensure 'docker compose' works on this machine."
+    fi
+}
+
+require_runtime_prereqs() {
+    require_command docker "Install Docker and ensure it is on your PATH."
+    if [[ "$SCENARIO" == "compose" ]]; then
+        require_compose
     fi
 }
 
@@ -982,7 +1049,12 @@ compose() {
 }
 
 service_container_id() {
-    compose ps -q "$SERVICE_NAME" 2>/dev/null | tail -n 1
+    if [[ "$SCENARIO" == "compose" ]]; then
+        compose ps -q "$SERVICE_NAME" 2>/dev/null | tail -n 1
+        return
+    fi
+
+    docker ps -aq --filter "name=^/${CONTAINER_NAME}$" 2>/dev/null | tail -n 1
 }
 
 container_is_running() {
@@ -1000,7 +1072,10 @@ ensure_service_container() {
     local container_id
     container_id="$(service_container_id)"
     if [[ -z "$container_id" ]]; then
-        die "Service '$SERVICE_NAME' is not available in compose project '$PROJECT_NAME'"
+        if [[ "$SCENARIO" == "compose" ]]; then
+            die "Service '$SERVICE_NAME' is not available in compose project '$PROJECT_NAME'"
+        fi
+        die "Container '$CONTAINER_NAME' is not available for project '$PROJECT_NAME'"
     fi
     printf '%s\n' "$container_id"
 }
@@ -1306,15 +1381,38 @@ start_stack() {
 
     run_host_command initializeCommand
 
-    if [[ ${#RUN_SERVICES[@]} -gt 0 ]]; then
-        up_args+=("${RUN_SERVICES[@]}")
-    fi
-
     print_step "Starting environment '$DISPLAY_NAME'"
-    compose "${up_args[@]}"
+
+    if [[ "$SCENARIO" == "compose" ]]; then
+        if [[ ${#RUN_SERVICES[@]} -gt 0 ]]; then
+            up_args+=("${RUN_SERVICES[@]}")
+        fi
+        compose "${up_args[@]}"
+    else
+        if [[ -n "$previous_container_id" ]]; then
+            docker start "$previous_container_id" >/dev/null
+        else
+            print_step "Building image '$IMAGE_NAME'"
+            docker build -t "$IMAGE_NAME" "${BUILD_ARGS[@]}" -f "$DOCKERFILE_PATH" "$BUILD_CONTEXT_PATH"
+
+            print_step "Creating container '$CONTAINER_NAME'"
+            docker run -d \
+                --name "$CONTAINER_NAME" \
+                --label "devenv.project=$PROJECT_NAME" \
+                --label "devenv.project_root=$PROJECT_ROOT" \
+                -w "$WORKSPACE_FOLDER" \
+                -v "$PROJECT_ROOT:$WORKSPACE_FOLDER" \
+                "${CONTAINER_ENV_ARGS[@]}" \
+                "${RUN_ARGS[@]}" \
+                --entrypoint /bin/sh \
+                "$IMAGE_NAME" \
+                -lc 'trap "exit 0" TERM INT; while sleep 1000; do :; done' >/dev/null
+        fi
+    fi
 
     current_container_id="$(ensure_service_container)"
     prune_creation_markers "$current_container_id"
+    wait_for_exec_ready "$current_container_id"
 
     if [[ -z "$previous_container_id" || "$previous_container_id" != "$current_container_id" ]]; then
         run_creation_lifecycle "$current_container_id"
@@ -1330,12 +1428,23 @@ start_stack() {
 }
 
 stop_stack() {
+    local container_id
+
     print_step "Stopping environment '$DISPLAY_NAME'"
-    if compose down --remove-orphans; then
+    if [[ "$SCENARIO" == "compose" ]]; then
+        if compose down --remove-orphans; then
+            clear_runtime_state
+            print_success "Environment stopped"
+        else
+            print_warning "Compose reported an error while stopping the environment"
+        fi
+    else
+        container_id="$(service_container_id)"
+        if [[ -n "$container_id" ]]; then
+            docker rm -f "$container_id" >/dev/null
+        fi
         clear_runtime_state
         print_success "Environment stopped"
-    else
-        print_warning "Compose reported an error while stopping the environment"
     fi
 }
 
@@ -1503,15 +1612,23 @@ command_host_tmux() {
 }
 
 command_logs() {
-    if [[ -n "$SERVICE_OVERRIDE" ]]; then
-        compose logs "$SERVICE_OVERRIDE"
+    if [[ "$SCENARIO" == "compose" ]]; then
+        if [[ -n "$SERVICE_OVERRIDE" ]]; then
+            compose logs "$SERVICE_OVERRIDE"
+        else
+            compose logs
+        fi
     else
-        compose logs
+        docker logs "$(ensure_service_container)"
     fi
 }
 
 command_ps() {
-    compose ps
+    if [[ "$SCENARIO" == "compose" ]]; then
+        compose ps
+    else
+        docker ps -a --filter "name=^/${CONTAINER_NAME}$"
+    fi
 }
 
 command_config() {
@@ -1524,13 +1641,25 @@ Project name:     $PROJECT_NAME
 Primary service:  $SERVICE_NAME
 Remote user:      ${REMOTE_USER:-<container default>}
 Workspace folder: $WORKSPACE_FOLDER
+EOF
+
+    if [[ "$SCENARIO" == "compose" ]]; then
+        cat <<EOF
 Compose files:
 $(printf '  - %s\n' "${COMPOSE_FILES[@]}")
 EOF
+    else
+        cat <<EOF
+Container name:   $CONTAINER_NAME
+Image name:       $IMAGE_NAME
+Dockerfile:       $DOCKERFILE_PATH
+Build context:    $BUILD_CONTEXT_PATH
+EOF
+    fi
 }
 
 command_check() {
-    require_compose
+    require_runtime_prereqs
     emit_spec_warnings
     print_success "Host prerequisites are available"
     command_config
@@ -1714,7 +1843,7 @@ main() {
             command_check
             ;;
         up|down|shell|exec|tool|container-tool|host-tmux|logs|ps|open)
-            require_compose
+            require_runtime_prereqs
             emit_spec_warnings
             case "$COMMAND" in
                 open)

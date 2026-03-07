@@ -10,13 +10,15 @@ The goal is straightforward:
 
 ## What It Does
 
-`devenv` discovers the current repo's devcontainer config, starts the compose stack, runs supported lifecycle hooks, and gives you a clean way to open shells or execute commands inside the configured service.
+`devenv` discovers the current repo's devcontainer config, starts the repo environment, runs supported lifecycle hooks, and gives you a clean way to open shells or execute commands inside the configured container.
 
 It currently supports:
 
 - discovery of `.devcontainer/devcontainer.json` or `.devcontainer.json`
 - compose-backed devcontainers with `dockerComposeFile` and `service`
+- Dockerfile-based devcontainers with `dockerFile` or `build.dockerfile`
 - stable per-repo compose project naming so multiple repos can run at once
+- stable per-repo container and image naming for Dockerfile-based repos
 - `initializeCommand` on the host
 - `onCreateCommand`, `updateContentCommand`, `postCreateCommand`, `postStartCommand`, and `postAttachCommand` when they are strings, arrays, or objects
 - shell workflows that either keep the environment running or remove it on exit with `--rm`
@@ -26,16 +28,17 @@ It currently supports:
 
 It does not yet support:
 
-- image-only or Dockerfile-only devcontainer definitions without compose
+- image-only devcontainer definitions
 - Dev Container Features
 - editor-specific `customizations`
 - automatic `forwardPorts`
+- extra `mounts` for Dockerfile-based repos
 - full Dev Container spec parity
 
 ## Host Requirements
 
 - `docker`
-- `docker compose`
+- `docker compose` for compose-backed repos
 - `jq`
 - `bash`
 
@@ -111,10 +114,10 @@ devenv uninstall [--prefix PATH]
 ## Behavior
 
 - `devenv` behaves like `open`: it starts the environment, opens a shell, and leaves services running when the shell exits.
-- `devenv open my-name` overrides the derived compose project name for that session.
+- `devenv open my-name` overrides the derived runtime name for that session.
 - `devenv --rm` tears the stack down after `open`, `shell`, `exec`, or `tool` exits.
 - `devenv shell` attaches to the configured service without tearing the stack down by default.
-- `devenv exec -- <cmd>` starts the environment if needed, waits until the service is ready, and then runs the command inside the configured service.
+- `devenv exec -- <cmd>` starts the environment if needed, waits until the target container is ready, and then runs the command inside it.
 - `devenv host-tmux` creates or attaches to a host tmux session named after the repo and starts a `devenv shell` in its first window.
 - `devenv tool ...` is optional and only works when the repo image already provides that tool.
 
