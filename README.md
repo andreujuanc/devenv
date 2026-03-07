@@ -32,7 +32,6 @@ It does not yet support:
 - Dev Container Features
 - editor-specific `customizations`
 - automatic `forwardPorts`
-- extra `mounts` for Dockerfile-based repos
 - full Dev Container spec parity
 
 ## Host Requirements
@@ -211,16 +210,54 @@ devenv container-tool list
 Preview install commands without running them:
 
 ```bash
-devenv container-tool install --print jq tmux helix copilot
+devenv container-tool install --print jq tmux helix git copilot
 ```
 
 Install tools in the current container:
 
 ```bash
-devenv container-tool install jq tmux helix copilot
+devenv container-tool install jq tmux helix git copilot
 ```
 
 Container-side installs are convenient, but they are not the source of truth. If the tooling matters for the repo, move it into the repo image later.
+
+## Git And SSH In Containers
+
+For Git support inside the container, there are two separate needs:
+
+- install `git` in the image or with `devenv container-tool install git`
+- expose credentials to the container
+
+If `SSH_AUTH_SOCK` exists on the host, `devenv` now forwards it automatically for both compose-backed and Dockerfile-based repos. It binds the host socket into the container at `/tmp/devenv-ssh-agent.sock` and exposes `SSH_AUTH_SOCK` for `devenv`-managed shell, exec, and lifecycle commands.
+
+If you do not want that behavior for a session, run `devenv` with `DEVENV_NO_SSH_AGENT_FORWARDING=1`.
+
+Mounting all of `~/.ssh` still works, but it is broader than necessary. The safer manual setup is to forward your SSH agent socket explicitly in the repo config.
+
+Example for a Dockerfile-based repo:
+
+```json
+{
+	"mounts": [
+		"source=${localEnv:SSH_AUTH_SOCK},target=/ssh-agent,type=bind"
+	],
+	"remoteEnv": {
+		"SSH_AUTH_SOCK": "/ssh-agent"
+	}
+}
+```
+
+If you really want key files inside the container, prefer a read-only mount instead:
+
+```json
+{
+	"mounts": [
+		"source=${localEnv:HOME}/.ssh,target=/home/node/.ssh,type=bind,readonly"
+	]
+}
+```
+
+Explicit repo config still works. If a repo already defines its own SSH-related `mounts`, `remoteEnv`, or `containerEnv`, `devenv` leaves that in place instead of adding the automatic forwarding.
 
 ## Optional In-Container Tools
 

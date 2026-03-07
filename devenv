@@ -39,6 +39,10 @@ IMAGE_NAME=""
 CONTAINER_NAME=""
 DOCKERFILE_PATH=""
 BUILD_CONTEXT_PATH=""
+AUTO_SSH_AGENT_FORWARDING=0
+AUTO_SSH_AGENT_SOURCE=""
+AUTO_SSH_AGENT_TARGET="/tmp/devenv-ssh-agent.sock"
+COMPOSE_RUNTIME_OVERRIDE=""
 
 declare -a COMPOSE_FILES=()
 declare -a COMPOSE_ARGS=()
@@ -48,10 +52,16 @@ declare -a TOOL_ARGS=()
 declare -a BUILD_ARGS=()
 declare -a RUN_ARGS=()
 declare -a CONTAINER_ENV_ARGS=()
+declare -a REMOTE_ENV_ARGS=()
+declare -a MOUNT_ARGS=()
 
 cleanup() {
     if [[ -n "$DEVCONTAINER_CACHE" && -f "$DEVCONTAINER_CACHE" ]]; then
         rm -f "$DEVCONTAINER_CACHE"
+    fi
+
+    if [[ -n "$COMPOSE_RUNTIME_OVERRIDE" && -f "$COMPOSE_RUNTIME_OVERRIDE" ]]; then
+        rm -f "$COMPOSE_RUNTIME_OVERRIDE"
     fi
 }
 
@@ -149,7 +159,7 @@ Usage:
 Notes:
     - Host installs are Linux-oriented and depend on the available package manager.
     - `copilot` uses: curl -fsSL https://gh.io/copilot-install | bash
-    - `lapce` installs the latest AppImage into ~/.local/bin/lapce.
+    - `lapce` installs the latest Linux release tarball into ~/.local/bin/lapce.
 EOF
 }
 
@@ -157,8 +167,8 @@ container_tool_help() {
         cat <<'EOF'
 Usage:
     devenv container-tool list
-    devenv container-tool check [jq|tmux|helix|yazi|ranger|lf|copilot ...]
-    devenv container-tool install <jq|tmux|helix|yazi|ranger|lf|copilot ...> [--print]
+    devenv container-tool check [jq|tmux|helix|git|yazi|ranger|lf|copilot ...]
+    devenv container-tool install <jq|tmux|helix|git|yazi|ranger|lf|copilot ...> [--print]
 
 Notes:
     - Container installs are mutable and can disappear when the container is recreated.
@@ -292,6 +302,106 @@ json_query_compact_lines() {
     jq -c "$filter" "$DEVCONTAINER_CACHE" 2>/dev/null || true
 }
 
+devcontainer_has_explicit_ssh_agent_config() {
+    ensure_devcontainer_cache
+    jq -e '
+        ((.remoteEnv // {}) | has("SSH_AUTH_SOCK")) or
+        ((.containerEnv // {}) | has("SSH_AUTH_SOCK")) or
+        (((.mounts // []) | map(tostring | test("SSH_AUTH_SOCK|ssh-agent"; "i")) | any) // false)
+    ' "$DEVCONTAINER_CACHE" >/dev/null 2>&1
+}
+
+yaml_single_quote() {
+    printf "%s" "$1" | sed "s/'/''/g"
+}
+
+expand_devcontainer_value() {
+    local value="$1"
+    local prefix variable_name has_default default_value suffix replacement
+
+    value="${value//\$\{localWorkspaceFolder\}/$PROJECT_ROOT}"
+    value="${value//\$\{localWorkspaceFolderBasename\}/$(basename "$PROJECT_ROOT")}"
+    value="${value//\$\{containerWorkspaceFolder\}/$WORKSPACE_FOLDER}"
+
+    while [[ "$value" =~ (.*)\$\{localEnv:([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}(.*) ]]; do
+        prefix="${BASH_REMATCH[1]}"
+        variable_name="${BASH_REMATCH[2]}"
+        has_default="${BASH_REMATCH[3]:-}"
+        default_value="${BASH_REMATCH[4]:-}"
+        suffix="${BASH_REMATCH[5]}"
+
+        if [[ -n "$has_default" ]]; then
+            replacement="${!variable_name:-$default_value}"
+        else
+            replacement="${!variable_name-}"
+        fi
+
+        value="${prefix}${replacement}${suffix}"
+    done
+
+    printf '%s\n' "$value"
+}
+
+load_remote_env_args() {
+    local entry key value
+
+    REMOTE_ENV_ARGS=()
+    while IFS= read -r entry; do
+        [[ -n "$entry" ]] || continue
+        key="$(jq -r '.key' <<< "$entry")"
+        value="$(jq -r '.value|tostring' <<< "$entry")"
+        value="$(expand_devcontainer_value "$value")"
+        REMOTE_ENV_ARGS+=(-e "$key=$value")
+    done < <(json_query_compact_lines '(.remoteEnv // {}) | to_entries[]')
+}
+
+configure_automatic_ssh_agent_forwarding() {
+    local quoted_service quoted_source quoted_target
+
+    AUTO_SSH_AGENT_FORWARDING=0
+    AUTO_SSH_AGENT_SOURCE=""
+    COMPOSE_RUNTIME_OVERRIDE=""
+
+    if [[ "${DEVENV_NO_SSH_AGENT_FORWARDING:-0}" == "1" ]]; then
+        return
+    fi
+
+    if [[ -z "${SSH_AUTH_SOCK:-}" || ! -S "${SSH_AUTH_SOCK:-}" ]]; then
+        return
+    fi
+
+    if devcontainer_has_explicit_ssh_agent_config; then
+        return
+    fi
+
+    AUTO_SSH_AGENT_FORWARDING=1
+    AUTO_SSH_AGENT_SOURCE="$SSH_AUTH_SOCK"
+    REMOTE_ENV_ARGS+=(-e "SSH_AUTH_SOCK=$AUTO_SSH_AGENT_TARGET")
+
+    if [[ "$SCENARIO" == "compose" ]]; then
+        quoted_service="$(yaml_single_quote "$SERVICE_NAME")"
+        quoted_source="$(yaml_single_quote "$AUTO_SSH_AGENT_SOURCE")"
+        quoted_target="$(yaml_single_quote "$AUTO_SSH_AGENT_TARGET")"
+        COMPOSE_RUNTIME_OVERRIDE="$PROJECT_STATE_DIR/compose.ssh-agent.override.yml"
+
+        cat > "$COMPOSE_RUNTIME_OVERRIDE" <<EOF
+services:
+  '$quoted_service':
+    environment:
+      SSH_AUTH_SOCK: '$quoted_target'
+    volumes:
+      - type: bind
+        source: '$quoted_source'
+        target: '$quoted_target'
+        read_only: true
+EOF
+
+        COMPOSE_ARGS+=(-f "$COMPOSE_RUNTIME_OVERRIDE")
+    else
+        MOUNT_ARGS+=("--mount=type=bind,source=$AUTO_SSH_AGENT_SOURCE,target=$AUTO_SSH_AGENT_TARGET,readonly")
+    fi
+}
+
 field_type() {
     local field="$1"
     ensure_devcontainer_cache
@@ -415,7 +525,7 @@ resolve_compose_files() {
 }
 
 resolve_dockerfile_settings() {
-    local dockerfile_entry context_entry resolved_path
+    local dockerfile_entry context_entry resolved_path run_arg mount_spec env_entry env_key env_value
 
     dockerfile_entry="$(json_query_optional '.dockerFile // .build.dockerfile')"
     [[ -n "$dockerfile_entry" ]] || die "The devcontainer configuration is missing dockerFile/build.dockerfile in $DEVCONTAINER_JSON"
@@ -442,13 +552,35 @@ resolve_dockerfile_settings() {
     [[ -d "$BUILD_CONTEXT_PATH" ]] || die "Build context '$BUILD_CONTEXT_PATH' does not exist"
 
     BUILD_ARGS=()
-    mapfile -t BUILD_ARGS < <(json_query_lines '(.args // .build.args // {}) | to_entries[] | "--build-arg=\(.key)=\(.value|tostring)"')
+    while IFS= read -r env_entry; do
+        [[ -n "$env_entry" ]] || continue
+        env_key="$(jq -r '.key' <<< "$env_entry")"
+        env_value="$(jq -r '.value|tostring' <<< "$env_entry")"
+        env_value="$(expand_devcontainer_value "$env_value")"
+        BUILD_ARGS+=("--build-arg=${env_key}=${env_value}")
+    done < <(json_query_compact_lines '(.args // .build.args // {}) | to_entries[]')
 
     RUN_ARGS=()
-    mapfile -t RUN_ARGS < <(json_query_lines '.runArgs // [] | .[]')
+    while IFS= read -r run_arg; do
+        [[ -n "$run_arg" ]] || continue
+        RUN_ARGS+=("$(expand_devcontainer_value "$run_arg")")
+    done < <(json_query_lines '.runArgs // [] | .[]')
 
     CONTAINER_ENV_ARGS=()
-    mapfile -t CONTAINER_ENV_ARGS < <(json_query_lines '(.containerEnv // {}) | to_entries[] | "-e" , "\(.key)=\(.value|tostring)"')
+    while IFS= read -r env_entry; do
+        [[ -n "$env_entry" ]] || continue
+        env_key="$(jq -r '.key' <<< "$env_entry")"
+        env_value="$(jq -r '.value|tostring' <<< "$env_entry")"
+        env_value="$(expand_devcontainer_value "$env_value")"
+        CONTAINER_ENV_ARGS+=(-e "$env_key=$env_value")
+    done < <(json_query_compact_lines '(.containerEnv // {}) | to_entries[]')
+
+    MOUNT_ARGS=()
+    while IFS= read -r mount_spec; do
+        [[ -n "$mount_spec" ]] || continue
+        mount_spec="$(expand_devcontainer_value "$mount_spec")"
+        MOUNT_ARGS+=("--mount=$mount_spec")
+    done < <(json_query_lines '.mounts // [] | .[]')
 }
 
 load_run_services() {
@@ -507,6 +639,7 @@ load_workspace_context() {
     PROJECT_NAME="$(build_project_name)"
     PROJECT_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/devenv/$PROJECT_HASH"
     mkdir -p "$PROJECT_STATE_DIR"
+    load_remote_env_args
 
     if [[ "$SCENARIO" == "compose" ]]; then
         resolve_compose_files
@@ -516,6 +649,8 @@ load_workspace_context() {
         CONTAINER_NAME="$PROJECT_NAME-devcontainer"
         resolve_dockerfile_settings
     fi
+
+    configure_automatic_ssh_agent_forwarding
 }
 
 emit_spec_warnings() {
@@ -531,8 +666,8 @@ emit_spec_warnings() {
         print_warning "forwardPorts is metadata only here. Publish ports in compose or rely on your editor to forward them."
     fi
 
-    if [[ "$SCENARIO" == "dockerfile" ]] && json_has_value "mounts"; then
-        print_warning "Additional mounts are not applied for Dockerfile-based repos yet. devenv only binds the workspace root."
+    if json_has_value "remoteEnv"; then
+        print_warning "remoteEnv is applied to devenv-managed shell, exec, and lifecycle commands, but not to background processes started by the container image itself."
     fi
 }
 
@@ -583,6 +718,9 @@ normalize_helper_tool() {
         helix|hx)
             printf 'helix\n'
             ;;
+        git)
+            printf 'git\n'
+            ;;
         lapce)
             printf 'lapce\n'
             ;;
@@ -615,7 +753,7 @@ host_tool_supported() {
 
 container_tool_supported() {
     case "$1" in
-        jq|tmux|helix|yazi|ranger|lf|copilot)
+        jq|tmux|helix|git|yazi|ranger|lf|copilot)
             return 0
             ;;
     esac
@@ -634,6 +772,7 @@ container_tool_list() {
     printf 'jq\n'
     printf 'tmux\n'
     printf 'helix\n'
+    printf 'git\n'
     printf 'yazi\n'
     printf 'ranger\n'
     printf 'lf\n'
@@ -797,7 +936,7 @@ command_host_tool_install() {
                 package_tools+=("$tool")
                 ;;
             lapce)
-                run_or_print_host_command 'mkdir -p "$HOME/.local/bin" && curl -fsSL https://github.com/lapce/lapce/releases/latest/download/Lapce-linux.AppImage -o "$HOME/.local/bin/lapce" && chmod +x "$HOME/.local/bin/lapce"'
+                run_or_print_host_command 'set -eu; arch="$(uname -m)"; case "$arch" in x86_64|amd64) lapce_arch="amd64" ;; aarch64|arm64) lapce_arch="arm64" ;; *) echo "devenv: unsupported Lapce host architecture: $arch" >&2; exit 1 ;; esac; tmpdir="$(mktemp -d)"; trap '\''rm -rf "$tmpdir"'\'' EXIT; mkdir -p "$HOME/.local/bin" "$HOME/.local/share/lapce"; curl -fsSL "https://github.com/lapce/lapce/releases/latest/download/lapce-linux-${lapce_arch}.tar.gz" -o "$tmpdir/lapce.tar.gz"; tar -xzf "$tmpdir/lapce.tar.gz" -C "$tmpdir"; install -m 0755 "$tmpdir/lapce/lapce" "$HOME/.local/bin/lapce"; if [[ -f "$tmpdir/lapce/lapce-proxy" ]]; then install -m 0755 "$tmpdir/lapce/lapce-proxy" "$HOME/.local/share/lapce/lapce-proxy"; fi'
                 ;;
             copilot)
                 run_or_print_host_command 'curl -fsSL https://gh.io/copilot-install | bash'
@@ -819,7 +958,7 @@ command_host_tool_install() {
 
 container_has_tool_script() {
     case "$1" in
-        jq|tmux|ranger|lf)
+        jq|tmux|git|ranger|lf)
             printf 'command -v %s >/dev/null 2>&1\n' "$1"
             ;;
         helix)
@@ -910,13 +1049,13 @@ command_container_tool_install() {
     local tool
     local script
 
-    require_tool_args "No container tools provided. Use: devenv container-tool install <jq|tmux|helix|yazi|ranger|lf|copilot ...>"
+    require_tool_args "No container tools provided. Use: devenv container-tool install <jq|tmux|helix|git|yazi|ranger|lf|copilot ...>"
     validate_tool_args container
 
     if [[ $PRINT_ONLY -eq 1 ]]; then
         for tool in "${TOOL_ARGS[@]}"; do
             case "$tool" in
-                jq|tmux|helix|yazi|ranger|lf)
+                jq|tmux|helix|git|yazi|ranger|lf)
                     package_tools+=("$tool")
                     ;;
                 copilot)
@@ -936,7 +1075,7 @@ command_container_tool_install() {
 
     for tool in "${TOOL_ARGS[@]}"; do
         case "$tool" in
-            jq|tmux|helix|yazi|ranger|lf)
+            jq|tmux|helix|git|yazi|ranger|lf)
                 package_tools+=("$tool")
                 ;;
             copilot)
@@ -1092,6 +1231,7 @@ docker_exec_base() {
         command+=(-u "$REMOTE_USER")
     fi
 
+    command+=("${REMOTE_ENV_ARGS[@]}")
     command+=(-w "$WORKSPACE_FOLDER" "$2")
     printf '%s\0' "${command[@]}"
 }
@@ -1402,6 +1542,7 @@ start_stack() {
                 --label "devenv.project_root=$PROJECT_ROOT" \
                 -w "$WORKSPACE_FOLDER" \
                 -v "$PROJECT_ROOT:$WORKSPACE_FOLDER" \
+                "${MOUNT_ARGS[@]}" \
                 "${CONTAINER_ENV_ARGS[@]}" \
                 "${RUN_ARGS[@]}" \
                 --entrypoint /bin/sh \
@@ -1641,6 +1782,7 @@ Project name:     $PROJECT_NAME
 Primary service:  $SERVICE_NAME
 Remote user:      ${REMOTE_USER:-<container default>}
 Workspace folder: $WORKSPACE_FOLDER
+SSH agent:        $(if [[ $AUTO_SSH_AGENT_FORWARDING -eq 1 ]]; then printf 'auto -> %s' "$AUTO_SSH_AGENT_TARGET"; else printf 'disabled'; fi)
 EOF
 
     if [[ "$SCENARIO" == "compose" ]]; then
