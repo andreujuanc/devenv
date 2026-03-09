@@ -12,4 +12,4 @@ fi
 
 echo "devenv: tool 'ai' requires copilot or gemini in the container image." >&2
 echo "devenv: install copilot with 'devenv container-tool install copilot' or add gemini to the image." >&2
-exec "${SHELL:-sh}" -il
+exec "${SHELL:-sh}" -i

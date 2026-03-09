@@ -9,4 +9,4 @@ fi
 git status --short --branch || true
 echo
 echo "devenv: install lazygit in the container for a richer git pane." >&2
-exec "${SHELL:-sh}" -il
+exec "${SHELL:-sh}" -i

@@ -57,7 +57,6 @@ declare -a TOOL_ARGS=()
 declare -a BUILD_ARGS=()
 declare -a RUN_ARGS=()
 declare -a CONTAINER_ENV_ARGS=()
-declare -a REMOTE_ENV_ARGS=()
 declare -a MOUNT_ARGS=()
 declare -a FORWARD_PORTS=()
 declare -a PORT_ARGS=()
@@ -360,17 +359,127 @@ expand_devcontainer_value() {
     printf '%s\n' "$value"
 }
 
-load_remote_env_args() {
+container_env_value() {
+    local container_id="$1"
+    local variable_name="$2"
+    local env_line env_key env_value
+
+    while IFS= read -r env_line; do
+        [[ -n "$env_line" ]] || continue
+        env_key="${env_line%%=*}"
+        env_value="${env_line#*=}"
+        if [[ "$env_key" == "$variable_name" ]]; then
+            printf '%s\n' "$env_value"
+            return 0
+        fi
+    done < <(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" 2>/dev/null || true)
+
+    return 1
+}
+
+expand_remote_env_value() {
+    local value="$1"
+    local container_id="$2"
+    local prefix variable_name has_default default_value suffix replacement
+
+    value="$(expand_devcontainer_value "$value")"
+
+    while [[ "$value" =~ (.*)\$\{containerEnv:([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}(.*) ]]; do
+        prefix="${BASH_REMATCH[1]}"
+        variable_name="${BASH_REMATCH[2]}"
+        has_default="${BASH_REMATCH[3]:-}"
+        default_value="${BASH_REMATCH[4]:-}"
+        suffix="${BASH_REMATCH[5]}"
+
+        if replacement="$(container_env_value "$container_id" "$variable_name")"; then
+            :
+        elif [[ -n "$has_default" ]]; then
+            replacement="$default_value"
+        else
+            replacement=""
+        fi
+
+        value="${prefix}${replacement}${suffix}"
+    done
+
+    printf '%s\n' "$value"
+}
+
+image_env_value() {
+    local image_name="$1"
+    local variable_name="$2"
+    local env_line env_key env_value
+
+    while IFS= read -r env_line; do
+        [[ -n "$env_line" ]] || continue
+        env_key="${env_line%%=*}"
+        env_value="${env_line#*=}"
+        if [[ "$env_key" == "$variable_name" ]]; then
+            printf '%s\n' "$env_value"
+            return 0
+        fi
+    done < <(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$image_name" 2>/dev/null || true)
+
+    return 1
+}
+
+expand_container_env_value() {
+    local value="$1"
+    local image_name="$2"
+    local prefix variable_name has_default default_value suffix replacement
+
+    value="$(expand_devcontainer_value "$value")"
+
+    while [[ "$value" =~ (.*)\$\{containerEnv:([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}(.*) ]]; do
+        prefix="${BASH_REMATCH[1]}"
+        variable_name="${BASH_REMATCH[2]}"
+        has_default="${BASH_REMATCH[3]:-}"
+        default_value="${BASH_REMATCH[4]:-}"
+        suffix="${BASH_REMATCH[5]}"
+
+        if replacement="$(image_env_value "$image_name" "$variable_name")"; then
+            :
+        elif [[ -n "$has_default" ]]; then
+            replacement="$default_value"
+        else
+            replacement=""
+        fi
+
+        value="${prefix}${replacement}${suffix}"
+    done
+
+    printf '%s\n' "$value"
+}
+
+load_container_env_args_for_image() {
+    local image_name="$1"
+    local env_entry env_key env_value
+
+    CONTAINER_ENV_ARGS=()
+    while IFS= read -r env_entry; do
+        [[ -n "$env_entry" ]] || continue
+        env_key="$(jq -r '.key' <<< "$env_entry")"
+        env_value="$(jq -r '.value|tostring' <<< "$env_entry")"
+        env_value="$(expand_container_env_value "$env_value" "$image_name")"
+        CONTAINER_ENV_ARGS+=(-e "$env_key=$env_value")
+    done < <(json_query_compact_lines '(.containerEnv // {}) | to_entries[]')
+}
+
+remote_env_args_for_container() {
+    local container_id="$1"
     local entry key value
 
-    REMOTE_ENV_ARGS=()
     while IFS= read -r entry; do
         [[ -n "$entry" ]] || continue
         key="$(jq -r '.key' <<< "$entry")"
         value="$(jq -r '.value|tostring' <<< "$entry")"
-        value="$(expand_devcontainer_value "$value")"
-        REMOTE_ENV_ARGS+=(-e "$key=$value")
+        value="$(expand_remote_env_value "$value" "$container_id")"
+        printf '%s\0' -e "$key=$value"
     done < <(json_query_compact_lines '(.remoteEnv // {}) | to_entries[]')
+
+    if [[ $AUTO_SSH_AGENT_FORWARDING -eq 1 ]]; then
+        printf '%s\0' -e "SSH_AUTH_SOCK=$AUTO_SSH_AGENT_TARGET"
+    fi
 }
 
 load_forward_ports() {
@@ -492,7 +601,6 @@ configure_automatic_ssh_agent_forwarding() {
 
     AUTO_SSH_AGENT_FORWARDING=1
     AUTO_SSH_AGENT_SOURCE="$SSH_AUTH_SOCK"
-    REMOTE_ENV_ARGS+=(-e "SSH_AUTH_SOCK=$AUTO_SSH_AGENT_TARGET")
 
         if [[ "$SCENARIO" == "dockerfile" ]]; then
         MOUNT_ARGS+=("--mount=type=bind,source=$AUTO_SSH_AGENT_SOURCE,target=$AUTO_SSH_AGENT_TARGET,readonly")
@@ -699,13 +807,6 @@ resolve_dockerfile_settings() {
     done < <(json_query_lines '.runArgs // [] | .[]')
 
     CONTAINER_ENV_ARGS=()
-    while IFS= read -r env_entry; do
-        [[ -n "$env_entry" ]] || continue
-        env_key="$(jq -r '.key' <<< "$env_entry")"
-        env_value="$(jq -r '.value|tostring' <<< "$env_entry")"
-        env_value="$(expand_devcontainer_value "$env_value")"
-        CONTAINER_ENV_ARGS+=(-e "$env_key=$env_value")
-    done < <(json_query_compact_lines '(.containerEnv // {}) | to_entries[]')
 
     MOUNT_ARGS=()
     while IFS= read -r mount_spec; do
@@ -774,7 +875,6 @@ load_workspace_context() {
     PROJECT_NAME="$(build_project_name)"
     PROJECT_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/devenv/$PROJECT_HASH"
     mkdir -p "$PROJECT_STATE_DIR"
-    load_remote_env_args
     load_forward_ports
 
     if [[ "$SCENARIO" == "compose" ]]; then
@@ -1604,6 +1704,10 @@ docker_exec_base() {
     local container_id="$2"
     local exec_user="${3:-$REMOTE_USER}"
     local -a command=(docker exec)
+    local -a remote_env_args=()
+
+    mapfile -d '' -t remote_env_args < <(remote_env_args_for_container "$container_id")
+
     if [[ "$exec_mode" == "interactive" ]]; then
         command+=(-it)
     else
@@ -1614,9 +1718,27 @@ docker_exec_base() {
         command+=(-u "$exec_user")
     fi
 
-    command+=("${REMOTE_ENV_ARGS[@]}")
+    command+=("${remote_env_args[@]}")
     command+=(-w "$WORKSPACE_FOLDER" "$container_id")
     printf '%s\0' "${command[@]}"
+}
+
+container_path_exists() {
+    local container_id="$1"
+    local candidate_path="$2"
+    local -a exec_args=()
+
+    mapfile -d '' -t exec_args < <(docker_exec_base non-interactive "$container_id")
+    "${exec_args[@]}" /bin/sh -c "test -x $(shell_escape "$candidate_path")" >/dev/null 2>&1
+}
+
+open_container_shell() {
+    local container_id="$1"
+    local shell_path="$2"
+    local -a exec_args=()
+
+    mapfile -d '' -t exec_args < <(docker_exec_base interactive "$container_id")
+    "${exec_args[@]}" "$shell_path" -i
 }
 
 run_host_command() {
@@ -1938,6 +2060,8 @@ start_stack() {
                 docker build -t "$IMAGE_NAME" "${BUILD_ARGS[@]}" -f "$DOCKERFILE_PATH" "$BUILD_CONTEXT_PATH"
             fi
 
+            load_container_env_args_for_image "$IMAGE_NAME"
+
             print_step "Creating container '$CONTAINER_NAME'"
             docker run -d \
                 --name "$CONTAINER_NAME" \
@@ -1995,12 +2119,30 @@ stop_stack() {
 
 open_shell() {
     local container_id="$1"
-    local shell_script='if command -v bash >/dev/null 2>&1; then exec bash -l; elif command -v sh >/dev/null 2>&1; then exec sh -l; else exec /bin/sh; fi'
-    local -a exec_args=()
 
     run_attach_lifecycle "$container_id"
-    mapfile -d '' -t exec_args < <(docker_exec_base interactive "$container_id")
-    "${exec_args[@]}" sh -lc "$shell_script"
+
+    if container_path_exists "$container_id" /bin/bash; then
+        open_container_shell "$container_id" /bin/bash
+        return
+    fi
+
+    if container_path_exists "$container_id" /usr/bin/bash; then
+        open_container_shell "$container_id" /usr/bin/bash
+        return
+    fi
+
+    if container_path_exists "$container_id" /bin/sh; then
+        open_container_shell "$container_id" /bin/sh
+        return
+    fi
+
+    if container_path_exists "$container_id" /usr/bin/sh; then
+        open_container_shell "$container_id" /usr/bin/sh
+        return
+    fi
+
+    die "Could not find an interactive shell in the container"
 }
 
 ensure_running() {

@@ -13,7 +13,7 @@ fi
 if command -v find >/dev/null 2>&1; then
     root="$1"
     find "$root" -maxdepth 3 \( -path "*/.git" -o -path "*/node_modules" \) -prune -o -print | sed "s#^$root#.#"
-    exec "${SHELL:-sh}" -il
+    exec "${SHELL:-sh}" -i
 fi
 
 exec ls -la "$@"
