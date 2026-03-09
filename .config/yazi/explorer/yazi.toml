@@ -1,0 +1,14 @@
+[mgr]
+ratio = [0, 1, 0]
+sort_by = "natural"
+sort_sensitive = false
+sort_reverse = false
+sort_dir_first = true
+linemode = "none"
+show_hidden = true
+show_symlink = false
+scrolloff = 6
+title_format = ""
+
+[preview]
+wrap = "no"

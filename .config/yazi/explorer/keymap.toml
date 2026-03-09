@@ -1,0 +1,13 @@
+[mgr]
+prepend_keymap = [
+  { on = [ "<Up>" ], run = "arrow -1", desc = "Move cursor up" },
+  { on = [ "<Down>" ], run = "arrow 1", desc = "Move cursor down" },
+  { on = [ "<PageUp>" ], run = "arrow -50%", desc = "Move up half a page" },
+  { on = [ "<PageDown>" ], run = "arrow 50%", desc = "Move down half a page" },
+  { on = [ "<Left>" ], run = "leave", desc = "Go to parent directory" },
+  { on = [ "<Backspace>" ], run = "leave", desc = "Go to parent directory" },
+  { on = [ "<Right>" ], run = "enter", desc = "Enter directory" },
+  { on = [ "<Enter>" ], run = "open --hovered", desc = "Open file" },
+  { on = [ "<Esc>" ], run = "quit --no-cwd-file", desc = "Close explorer" },
+  { on = [ "<C-h>" ], run = "hidden toggle", desc = "Toggle hidden files" }
+]

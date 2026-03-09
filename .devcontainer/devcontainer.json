@@ -1,0 +1,7 @@
+{
+  "name": "devenv",
+  "dockerFile": "Dockerfile",
+  "context": "..",
+  "workspaceFolder": "/workspace",
+  "remoteUser": "node"
+}

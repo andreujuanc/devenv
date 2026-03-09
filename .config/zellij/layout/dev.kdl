@@ -1,0 +1,25 @@
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        children
+        pane size=2 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+
+    tab name="dev" cwd="." split_direction="horizontal" hide_floating_panes=true {
+        pane size="68%" name="micro" focus=true command="devenv" {
+            args "tool" "micro"
+        }
+        pane size="32%" name="ai" command="devenv" {
+            args "tool" "ai"
+        }
+        floating_panes {
+            pane name="shell" x="8%" y="68%" width="84%" height="28%" command="devenv" {
+                args "shell"
+            }
+        }
+    }
+}

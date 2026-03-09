@@ -51,13 +51,9 @@ Install `devenv` into `~/.local/bin`:
 ./devenv install
 ```
 
-Install as a symlink instead of a copy:
+This creates a symlink back to your git checkout, so updates in the repo are picked up immediately.
 
-```bash
-./devenv install --mode symlink --force
-```
-
-Remove an installed copy:
+Remove the installed symlink:
 
 ```bash
 ./devenv uninstall
@@ -69,6 +65,12 @@ From inside a repo with a supported `.devcontainer`:
 
 ```bash
 devenv
+```
+
+Start a host-side dev session with a VS Code-like Zellij layout:
+
+```bash
+devenv dev
 ```
 
 Run a command in the container:
@@ -93,12 +95,15 @@ devenv config
 
 ```text
 devenv
-devenv open [project_name] [--workspace PATH] [--rm]
-devenv up [--workspace PATH] [--project-name NAME]
+devenv dev [--workspace PATH] [--project-name NAME] [--service NAME] [--rm] [--no-cache]
+devenv vibe [--workspace PATH] [--project-name NAME] [--service NAME] [--rm] [--no-cache]
+devenv ide [--workspace PATH] [--project-name NAME] [--service NAME] [--rm] [--no-cache]
+devenv open [project_name] [--workspace PATH] [--rm] [--no-cache]
+devenv up [--workspace PATH] [--project-name NAME] [--no-cache]
 devenv down [--workspace PATH] [--project-name NAME]
-devenv shell [--workspace PATH] [--project-name NAME] [--service NAME]
-devenv exec [--workspace PATH] [--project-name NAME] [--service NAME] -- <command> [args...]
-devenv tool <helix|tmux|files> [--workspace PATH] [--project-name NAME] [--service NAME] [-- args...]
+devenv shell [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache]
+devenv exec [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] -- <command> [args...]
+devenv tool <helix|micro|tmux|files|tree|git|ai> [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [-- args...]
 devenv host-tool <list|check|install> [tool...] [--print]
 devenv container-tool <list|check|install> [tool...] [--print]
 devenv host-tmux [--workspace PATH] [--project-name NAME] [--service NAME]
@@ -106,15 +111,21 @@ devenv logs [--workspace PATH] [--project-name NAME] [--service NAME]
 devenv ps [--workspace PATH] [--project-name NAME]
 devenv config [--workspace PATH]
 devenv check [--workspace PATH]
-devenv install [--prefix PATH] [--mode copy|symlink] [--force]
+devenv install [--prefix PATH] [--force]
 devenv uninstall [--prefix PATH]
 ```
 
 ## Behavior
 
 - `devenv` behaves like `open`: it starts the environment, opens a shell, and leaves services running when the shell exits.
+- `devenv dev` starts the environment and opens a host-side Zellij layout with a file browser, editor pane, git pane, and a `devenv shell` pane.
+- `devenv vibe` starts the environment and opens a host-side Zellij layout with container-only git, AI, and shell panes.
+- `devenv ide` is an alias for `devenv dev`.
 - `devenv open my-name` overrides the derived runtime name for that session.
+- `--no-cache` forces a fresh image rebuild when `devenv` starts the environment.
 - `devenv --rm` tears the stack down after `open`, `shell`, `exec`, or `tool` exits.
+- `devenv dev --rm` tears the stack down after the Zellij session exits.
+- `devenv vibe --rm` tears the stack down after the Zellij session exits.
 - `devenv shell` attaches to the configured service without tearing the stack down by default.
 - `devenv exec -- <cmd>` starts the environment if needed, waits until the target container is ready, and then runs the command inside it.
 - `forwardPorts` is published on the host as `127.0.0.1:<port>` for the primary service/container.
@@ -125,7 +136,7 @@ devenv uninstall [--prefix PATH]
 
 The cleanest setup is:
 
-- host machine: `docker`, `docker compose`, `jq`, `tmux` or another multiplexer, and your editor such as Helix or Lapce
+- host machine: `docker`, `docker compose`, `jq`, `zellij` or `tmux`, and your editor such as Helix or Micro
 - repo containers: language runtimes, package managers, test tools, app dependencies, and repo-specific CLIs
 
 That keeps personal UI tools on the host while keeping SDKs and build tooling inside containers.
@@ -143,6 +154,71 @@ Run a shell or command in the container:
 ```bash
 devenv shell
 devenv exec -- npm test
+```
+
+### Zellij Dev Session
+
+Open a Zellij workspace from the current repo:
+
+```bash
+devenv dev
+```
+
+The generated dev layout now keeps the working panes inside the container:
+
+- main pane: container-scoped `devenv tool micro`
+- right pane: container-scoped AI CLI via `devenv tool ai`, preferring `copilot`, then `gemini`, then `gemini-cli`
+- hidden floating shell pane: container shell via `devenv shell`, positioned near the bottom and toggled with `Alt-f`
+
+Recommended host tools:
+
+```bash
+devenv host-tool install zellij
+devenv host-tool check zellij
+```
+
+Recommended container tools for the dev layout:
+
+```bash
+devenv container-tool install micro copilot
+```
+
+`copilot` can be installed by `devenv`. Gemini is detected if your image already provides it.
+
+If you want to tear the environment down when you leave the Zellij session:
+
+```bash
+devenv dev --rm
+```
+
+### Zellij Vibe Session
+
+Open a simpler container-only Zellij workspace from the current repo:
+
+```bash
+devenv vibe
+```
+
+The generated vibe layout keeps all working panes inside the container:
+
+- left pane: container-scoped git UI via `devenv tool git`, preferring `lazygit`, then `gitui`, then `git status`
+- right pane: container-scoped AI CLI via `devenv tool ai`, preferring `copilot`, then `gemini`, then `gemini-cli`
+- hidden floating shell pane: container shell via `devenv shell`, positioned near the bottom and toggled with Zellij's floating-pane shortcut
+
+By default, the shell starts hidden in `vibe`. Toggle it with `Alt-f`, which maps to Zellij's `ToggleFloatingPanes` action in the default keymap.
+
+Recommended container tools for the vibe layout:
+
+```bash
+devenv container-tool install lazygit copilot
+```
+
+`copilot` can be installed by `devenv`. Gemini is detected if your image already provides it.
+
+If you want to tear the environment down when you leave the Zellij session:
+
+```bash
+devenv vibe --rm
 ```
 
 ### tmux Workflow
@@ -171,7 +247,7 @@ Those panes stay visible because each one is an interactive shell. Run long-live
 
 ### Host Tools
 
-Use `host-tool` for things that belong on the machine running `devenv`, such as `jq`, `tmux`, `helix`, `lapce`, and `copilot`.
+Use `host-tool` for things that belong on the machine running `devenv`, such as `jq`, `git`, `helix`, `micro`, `lazygit`, `lf`, `yazi`, and `zellij`.
 
 List supported host tools:
 
@@ -182,20 +258,33 @@ devenv host-tool list
 Check what is installed:
 
 ```bash
-devenv host-tool check jq tmux helix copilot
+devenv host-tool check jq git helix micro lf yazi lazygit zellij
 ```
 
 Install host tools:
 
 ```bash
-devenv host-tool install jq tmux helix copilot
-devenv host-tool install lapce
+devenv host-tool install jq git helix micro
+devenv host-tool install lf zellij
+devenv host-tool install yazi lazygit
 ```
 
-`copilot` uses the standalone installer:
+`devenv dev` no longer depends on `lf` or `yazi` on the host. They remain available as optional host utilities if you want them separately. `micro` installs with the official `getmic.ro` bootstrap script into `~/.local/bin`. `yazi` installs from the official release musl-linked `.deb` on apt-based systems and via Fedora COPR on `dnf`-based systems. `lazygit` currently uses a Fedora COPR install via `dnf`, and `zellij` installs from the matching `x86_64` or `aarch64` Linux release tarball.
+
+Current host install flows:
 
 ```bash
-curl -fsSL https://gh.io/copilot-install | bash
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+curl -fsSL "https://github.com/sxyazi/yazi/releases/download/v26.1.22/yazi-x86_64-unknown-linux-musl.deb" -o "$tmpdir/yazi.deb"
+sudo apt-get update
+sudo apt-get install --reinstall -y "$tmpdir/yazi.deb"
+
+sudo dnf copr enable lihaohong/yazi -y
+sudo dnf install -y yazi
+
+sudo dnf copr enable dejan/lazygit -y
+sudo dnf install -y lazygit
 ```
 
 ### Container Tools
@@ -211,16 +300,20 @@ devenv container-tool list
 Preview install commands without running them:
 
 ```bash
-devenv container-tool install --print jq tmux helix git copilot
+devenv container-tool install --print jq helix micro git yazi copilot
 ```
 
 Install tools in the current container:
 
 ```bash
-devenv container-tool install jq tmux helix git copilot
+devenv container-tool install jq helix micro git yazi copilot
 ```
 
 Container-side installs are convenient, but they are not the source of truth. If the tooling matters for the repo, move it into the repo image later.
+
+For package-manager based installs, `devenv` runs the install step as `root` with `docker exec -u root`, so the container does not need `sudo` for these mutable installs.
+
+On apt-based containers, `yazi` is installed from the official musl-linked release `.deb` because Debian/Ubuntu repositories may not provide a current `yazi` package and newer glibc-linked builds can be incompatible with older base images.
 
 ## Git And SSH In Containers
 
@@ -232,6 +325,10 @@ For Git support inside the container, there are two separate needs:
 If `SSH_AUTH_SOCK` exists on the host, `devenv` now forwards it automatically for both compose-backed and Dockerfile-based repos. It binds the host socket into the container at `/tmp/devenv-ssh-agent.sock` and exposes `SSH_AUTH_SOCK` for `devenv`-managed shell, exec, and lifecycle commands.
 
 If you do not want that behavior for a session, run `devenv` with `DEVENV_NO_SSH_AGENT_FORWARDING=1`.
+
+If `~/.copilot` or `~/.gemini` exist on the host, `devenv` also mounts them automatically into the container user's home directory as `~/.copilot` and `~/.gemini`, unless the repo already defines its own mount for those paths.
+
+If you do not want that behavior for a session, run `devenv` with `DEVENV_NO_HOST_DOTDIR_FORWARDING=1`.
 
 Mounting all of `~/.ssh` still works, but it is broader than necessary. The safer manual setup is to forward your SSH agent socket explicitly in the repo config.
 
@@ -266,6 +363,7 @@ If a repo image already includes terminal tools, `devenv` can launch them direct
 
 ```bash
 devenv tool helix
+devenv tool micro
 devenv tool files
 ```
 
@@ -287,6 +385,7 @@ If you want reproducible repo tooling, put it in the image. If you want personal
 ## Notes
 
 - `--rm` does not affect `host-tmux`; it only changes whether the stack is removed after `open`, `shell`, `exec`, or `tool` exits.
+- `devenv dev` requires `zellij` on the host. The left pane now uses a built-in picker, so host file managers are no longer required for the dev session.
 - `forwardPorts` currently supports numeric ports and `<service>:<port>` entries for the primary service. They are published on `127.0.0.1` rather than all interfaces.
 - Editor-specific `customizations` are ignored on purpose.
 

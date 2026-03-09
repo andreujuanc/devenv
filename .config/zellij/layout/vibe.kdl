@@ -1,0 +1,27 @@
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        children
+        pane size=2 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+
+    tab name="vibe" cwd="." split_direction="vertical" hide_floating_panes=true {
+        pane split_direction="vertical" {
+            pane size="60%" name="git" command="devenv" {
+                args "tool" "git"
+            }
+            pane size="40%" name="ai" focus=true command="devenv" {
+                args "tool" "ai"
+            }
+        }
+        floating_panes {
+            pane name="shell" x="5%" y="68%" width="90%" height="28%" command="devenv" {
+                args "shell"
+            }
+        }
+    }
+}

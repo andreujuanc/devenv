@@ -3,6 +3,9 @@
 set -euo pipefail
 
 VERSION="0.1.0"
+YAZI_HOST_VERSION="26.1.22"
+EZA_VERSION="0.23.4"
+LAZYGIT_VERSION="0.59.0"
 DEFAULT_DEVCONTAINER_JSON=".devcontainer/devcontainer.json"
 FALLBACK_DEVCONTAINER_JSON=".devcontainer.json"
 DEFAULT_INSTALL_PREFIX="${HOME}/.local/bin"
@@ -22,8 +25,8 @@ PROJECT_NAME_OVERRIDE=""
 SERVICE_OVERRIDE=""
 REMOVE_ON_EXIT=0
 INSTALL_PREFIX="$DEFAULT_INSTALL_PREFIX"
-INSTALL_MODE="copy"
 FORCE_INSTALL=0
+NO_CACHE_BUILD=0
 DISPLAY_NAME=""
 SCENARIO=""
 SERVICE_NAME=""
@@ -42,7 +45,9 @@ BUILD_CONTEXT_PATH=""
 AUTO_SSH_AGENT_FORWARDING=0
 AUTO_SSH_AGENT_SOURCE=""
 AUTO_SSH_AGENT_TARGET="/tmp/devenv-ssh-agent.sock"
+AUTO_HOST_DOTDIR_MOUNTING=0
 COMPOSE_RUNTIME_OVERRIDE=""
+DEV_SESSION_LAYOUT=""
 
 declare -a COMPOSE_FILES=()
 declare -a COMPOSE_ARGS=()
@@ -56,6 +61,8 @@ declare -a REMOTE_ENV_ARGS=()
 declare -a MOUNT_ARGS=()
 declare -a FORWARD_PORTS=()
 declare -a PORT_ARGS=()
+declare -a AUTO_HOST_MOUNT_SOURCES=()
+declare -a AUTO_HOST_MOUNT_TARGETS=()
 
 cleanup() {
     if [[ -n "$DEVCONTAINER_CACHE" && -f "$DEVCONTAINER_CACHE" ]]; then
@@ -64,6 +71,10 @@ cleanup() {
 
     if [[ -n "$COMPOSE_RUNTIME_OVERRIDE" && -f "$COMPOSE_RUNTIME_OVERRIDE" ]]; then
         rm -f "$COMPOSE_RUNTIME_OVERRIDE"
+    fi
+
+    if [[ -n "$DEV_SESSION_LAYOUT" && -f "$DEV_SESSION_LAYOUT" ]]; then
+        rm -f "$DEV_SESSION_LAYOUT"
     fi
 }
 
@@ -95,12 +106,15 @@ usage() {
         cat <<'EOF'
 Usage:
     devenv
-    devenv open [project_name] [--workspace PATH] [--rm]
-    devenv up [--workspace PATH] [--project-name NAME]
+    devenv dev [--workspace PATH] [--project-name NAME] [--service NAME] [--rm] [--no-cache]
+    devenv vibe [--workspace PATH] [--project-name NAME] [--service NAME] [--rm] [--no-cache]
+    devenv ide [--workspace PATH] [--project-name NAME] [--service NAME] [--rm] [--no-cache]
+    devenv open [project_name] [--workspace PATH] [--rm] [--no-cache]
+    devenv up [--workspace PATH] [--project-name NAME] [--no-cache]
     devenv down [--workspace PATH] [--project-name NAME]
-    devenv shell [--workspace PATH] [--project-name NAME] [--service NAME]
-    devenv exec [--workspace PATH] [--project-name NAME] [--service NAME] -- <command> [args...]
-    devenv tool <helix|tmux|files> [--workspace PATH] [--project-name NAME] [--service NAME] [-- args...]
+    devenv shell [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache]
+    devenv exec [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] -- <command> [args...]
+    devenv tool <helix|micro|tmux|files|tree|git|ai> [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [-- args...]
     devenv host-tool <list|check|install> [tool...] [--print]
     devenv container-tool <list|check|install> [tool...] [--print]
     devenv host-tmux [--workspace PATH] [--project-name NAME] [--service NAME]
@@ -108,11 +122,14 @@ Usage:
     devenv ps [--workspace PATH] [--project-name NAME]
     devenv config [--workspace PATH] [--project-name NAME]
     devenv check [--workspace PATH]
-    devenv install [--prefix PATH] [--mode copy|symlink] [--force]
+    devenv install [--prefix PATH] [--force]
     devenv uninstall [--prefix PATH]
     devenv help
 
 Commands:
+    dev        Start a host-side zellij workspace with container micro, AI, and shell panes.
+    vibe       Start a simplified host-side zellij workspace with container git, AI, and shell panes.
+    ide        Alias for `dev`.
     open       Start the environment and attach a shell. Use --rm to stop it on shell exit.
     up         Start the environment and run supported lifecycle commands.
     down       Stop and remove the environment.
@@ -135,8 +152,8 @@ Options:
     --project-name, -p  Override the derived compose project name.
     --service, -s       Override the primary service from devcontainer.json.
     --prefix            Install or uninstall target directory. Defaults to ~/.local/bin.
-    --mode              Install using a copied file or a symlink. Defaults to copy.
     --force             Replace an existing installed file.
+    --no-cache          Rebuild images from scratch without using Docker build cache.
     --rm                Stop services when the shell from `open` exits.
     --print             Print install commands instead of running them.
     --help, -h          Show this message.
@@ -146,8 +163,9 @@ Notes:
     - v1 supports compose-backed devcontainers and Dockerfile-based devcontainers.
     - Editor customizations, features, and automatic port forwarding are not applied by this wrapper.
     - `devenv tool ...` is optional and only works when the repo image provides those binaries.
+    - `devenv dev` and `devenv vibe` use zellij on the host and keep shells and app commands in containers.
     - `devenv host-tmux` uses tmux on the host and keeps all SDKs and app commands in containers.
-        - `host-tool` installs host UX and launcher dependencies; `container-tool` installs mutable extras inside the active container.
+    - `host-tool` installs host UX and launcher dependencies; `container-tool` installs mutable extras inside the active container.
 EOF
 }
 
@@ -155,13 +173,15 @@ host_tool_help() {
         cat <<'EOF'
 Usage:
     devenv host-tool list
-    devenv host-tool check [jq|tmux|helix|lapce|copilot ...]
-    devenv host-tool install <jq|tmux|helix|lapce|copilot ...> [--print]
+    devenv host-tool check [jq|git|helix|micro|lf|yazi|lazygit|zellij ...]
+    devenv host-tool install <jq|git|helix|micro|lf|yazi|lazygit|zellij ...> [--print]
 
 Notes:
     - Host installs are Linux-oriented and depend on the available package manager.
-    - `copilot` uses: curl -fsSL https://gh.io/copilot-install | bash
-    - `lapce` installs the latest Linux release tarball into ~/.local/bin/lapce.
+    - `lf` installs from the host package manager when available and is the default left-side explorer for `devenv dev`.
+    - `yazi` installs via the official `.deb` release on apt-based systems and via Fedora COPR on dnf-based systems.
+    - `lazygit` host installs currently use a Fedora COPR flow.
+    - `zellij` installs from the matching Linux release tarball into ~/.local/bin.
 EOF
 }
 
@@ -169,8 +189,8 @@ container_tool_help() {
         cat <<'EOF'
 Usage:
     devenv container-tool list
-    devenv container-tool check [jq|tmux|helix|git|yazi|ranger|lf|copilot ...]
-    devenv container-tool install <jq|tmux|helix|git|yazi|ranger|lf|copilot ...> [--print]
+    devenv container-tool check [jq|helix|micro|git|yazi|ranger|lf|lazygit|copilot ...]
+    devenv container-tool install <jq|helix|micro|git|yazi|ranger|lf|lazygit|copilot ...> [--print]
 
 Notes:
     - Container installs are mutable and can disappear when the container is recreated.
@@ -313,8 +333,25 @@ devcontainer_has_explicit_ssh_agent_config() {
     ' "$DEVCONTAINER_CACHE" >/dev/null 2>&1
 }
 
+devcontainer_has_explicit_host_dir_config() {
+    local dir_name="$1"
+    ensure_devcontainer_cache
+    jq -e --arg dir_name "$dir_name" '
+        (((.mounts // []) | map(tostring | test($dir_name; "i")) | any) // false)
+    ' "$DEVCONTAINER_CACHE" >/dev/null 2>&1
+}
+
 yaml_single_quote() {
     printf "%s" "$1" | sed "s/'/''/g"
+}
+
+container_home_dir() {
+    if [[ -z "$REMOTE_USER" || "$REMOTE_USER" == "root" ]]; then
+        printf '/root\n'
+        return
+    fi
+
+    printf '/home/%s\n' "$REMOTE_USER"
 }
 
 mount_spec_value() {
@@ -424,13 +461,13 @@ load_forward_ports() {
 }
 
 write_compose_runtime_override() {
-    local quoted_service quoted_source quoted_target port
+    local quoted_service quoted_source quoted_target port index
 
     if [[ "$SCENARIO" != "compose" ]]; then
         return
     fi
 
-    if [[ $AUTO_SSH_AGENT_FORWARDING -eq 0 && ${#FORWARD_PORTS[@]} -eq 0 ]]; then
+    if [[ $AUTO_SSH_AGENT_FORWARDING -eq 0 && ${#FORWARD_PORTS[@]} -eq 0 && ${#AUTO_HOST_MOUNT_SOURCES[@]} -eq 0 ]]; then
         return
     fi
 
@@ -442,15 +479,32 @@ write_compose_runtime_override() {
         printf "  '%s':\n" "$quoted_service"
 
         if [[ $AUTO_SSH_AGENT_FORWARDING -eq 1 ]]; then
-            quoted_source="$(yaml_single_quote "$AUTO_SSH_AGENT_SOURCE")"
             quoted_target="$(yaml_single_quote "$AUTO_SSH_AGENT_TARGET")"
             printf '    environment:\n'
             printf "      SSH_AUTH_SOCK: '%s'\n" "$quoted_target"
+        fi
+
+        if [[ $AUTO_SSH_AGENT_FORWARDING -eq 1 || ${#AUTO_HOST_MOUNT_SOURCES[@]} -gt 0 ]]; then
             printf '    volumes:\n'
+        fi
+
+        if [[ $AUTO_SSH_AGENT_FORWARDING -eq 1 ]]; then
+            quoted_source="$(yaml_single_quote "$AUTO_SSH_AGENT_SOURCE")"
+            quoted_target="$(yaml_single_quote "$AUTO_SSH_AGENT_TARGET")"
             printf '      - type: bind\n'
             printf "        source: '%s'\n" "$quoted_source"
             printf "        target: '%s'\n" "$quoted_target"
             printf '        read_only: true\n'
+        fi
+
+        if [[ ${#AUTO_HOST_MOUNT_SOURCES[@]} -gt 0 ]]; then
+            for index in "${!AUTO_HOST_MOUNT_SOURCES[@]}"; do
+                quoted_source="$(yaml_single_quote "${AUTO_HOST_MOUNT_SOURCES[$index]}")"
+                quoted_target="$(yaml_single_quote "${AUTO_HOST_MOUNT_TARGETS[$index]}")"
+                printf '      - type: bind\n'
+                printf "        source: '%s'\n" "$quoted_source"
+                printf "        target: '%s'\n" "$quoted_target"
+            done
         fi
 
         if [[ ${#FORWARD_PORTS[@]} -gt 0 ]]; then
@@ -504,6 +558,41 @@ configure_automatic_ssh_agent_forwarding() {
         MOUNT_ARGS+=("--mount=type=bind,source=$AUTO_SSH_AGENT_SOURCE,target=$AUTO_SSH_AGENT_TARGET,readonly")
     fi
 }
+
+    configure_automatic_host_dir_mounts() {
+        local container_home host_dir target_dir
+
+        AUTO_HOST_DOTDIR_MOUNTING=0
+        AUTO_HOST_MOUNT_SOURCES=()
+        AUTO_HOST_MOUNT_TARGETS=()
+
+        if [[ "${DEVENV_NO_HOST_DOTDIR_FORWARDING:-0}" == "1" ]]; then
+            return
+        fi
+
+        container_home="$(container_home_dir)"
+
+        for dir_name in .copilot .gemini; do
+            host_dir="$HOME/$dir_name"
+            target_dir="$container_home/$dir_name"
+
+            if [[ ! -d "$host_dir" ]]; then
+                continue
+            fi
+
+            if devcontainer_has_explicit_host_dir_config "$dir_name"; then
+                continue
+            fi
+
+            AUTO_HOST_DOTDIR_MOUNTING=1
+            AUTO_HOST_MOUNT_SOURCES+=("$host_dir")
+            AUTO_HOST_MOUNT_TARGETS+=("$target_dir")
+
+            if [[ "$SCENARIO" == "dockerfile" ]]; then
+                MOUNT_ARGS+=("--mount=type=bind,source=$host_dir,target=$target_dir")
+            fi
+        done
+    }
 
 field_type() {
     local field="$1"
@@ -758,6 +847,7 @@ load_workspace_context() {
     fi
 
     configure_automatic_ssh_agent_forwarding
+    configure_automatic_host_dir_mounts
     configure_forward_ports
     write_compose_runtime_override
 }
@@ -790,12 +880,220 @@ require_runtime_prereqs() {
     fi
 }
 
+resolved_file_path() {
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$1"
+        return
+    fi
+
+    if command -v readlink >/dev/null 2>&1; then
+        readlink -f "$1"
+        return
+    fi
+
+    absolute_file_path "$1"
+}
+
 self_path() {
-    absolute_file_path "${BASH_SOURCE[0]}"
+    resolved_file_path "${BASH_SOURCE[0]}"
+}
+
+script_asset_path() {
+    local asset_path="$1"
+    local base_dir
+
+    base_dir="$(absolute_directory_path "$(dirname "$(self_path)")")"
+    printf '%s/%s\n' "$base_dir" "$asset_path"
+}
+
+require_script_asset() {
+    local asset_path
+
+    asset_path="$(script_asset_path "$1")"
+    [[ -f "$asset_path" ]] || die "Required script asset '$1' not found next to $(self_path)"
+    printf '%s\n' "$asset_path"
+}
+
+script_asset_content() {
+    cat "$(require_script_asset "$1")"
 }
 
 shell_escape() {
     printf '%q' "$1"
+}
+
+kdl_escape() {
+    local value="$1"
+
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/ }"
+
+    printf '%s' "$value"
+}
+
+write_dev_session_layout() {
+    local launcher_path="$1"
+    local shell_args=()
+    local micro_args=()
+    local ai_args=()
+    local launcher_arg
+
+    DEV_SESSION_LAYOUT="$(mktemp)"
+
+    shell_args=(
+        "shell"
+        "--workspace"
+        "$PROJECT_ROOT"
+        "--project-name"
+        "$PROJECT_NAME"
+    )
+
+    micro_args=(
+        "tool"
+        "micro"
+        "--workspace"
+        "$PROJECT_ROOT"
+        "--project-name"
+        "$PROJECT_NAME"
+    )
+
+    ai_args=(
+        "tool"
+        "ai"
+        "--workspace"
+        "$PROJECT_ROOT"
+        "--project-name"
+        "$PROJECT_NAME"
+    )
+
+    if [[ -n "$SERVICE_OVERRIDE" ]]; then
+        shell_args+=("--service" "$SERVICE_OVERRIDE")
+        micro_args+=("--service" "$SERVICE_OVERRIDE")
+        ai_args+=("--service" "$SERVICE_OVERRIDE")
+    fi
+
+    {
+        printf 'layout {\n'
+        printf '    default_tab_template {\n'
+        printf '        pane size=1 borderless=true {\n'
+        printf '            plugin location="zellij:tab-bar"\n'
+        printf '        }\n'
+        printf '        children\n'
+        printf '        pane size=2 borderless=true {\n'
+        printf '            plugin location="zellij:status-bar"\n'
+        printf '        }\n'
+        printf '    }\n'
+        printf '    tab name="dev" cwd="%s" split_direction="horizontal" hide_floating_panes=true {\n' "$(kdl_escape "$PROJECT_ROOT")"
+        printf '        pane size="68%%" name="micro" focus=true command="%s" {\n' "$(kdl_escape "$launcher_path")"
+        printf '            args'
+        for launcher_arg in "${micro_args[@]}"; do
+            printf ' "%s"' "$(kdl_escape "$launcher_arg")"
+        done
+        printf '\n'
+        printf '        }\n'
+        printf '        pane size="32%%" name="ai" command="%s" {\n' "$(kdl_escape "$launcher_path")"
+        printf '            args'
+        for launcher_arg in "${ai_args[@]}"; do
+            printf ' "%s"' "$(kdl_escape "$launcher_arg")"
+        done
+        printf '\n'
+        printf '        }\n'
+        printf '        floating_panes {\n'
+        printf '            pane name="shell" x="8%%" y="68%%" width="84%%" height="28%%" command="%s" {\n' "$(kdl_escape "$launcher_path")"
+        printf '                args'
+        for launcher_arg in "${shell_args[@]}"; do
+            printf ' "%s"' "$(kdl_escape "$launcher_arg")"
+        done
+        printf '\n'
+        printf '            }\n'
+        printf '        }\n'
+        printf '        }\n'
+        printf '}\n'
+    } > "$DEV_SESSION_LAYOUT"
+}
+
+write_vibe_session_layout() {
+    local launcher_path="$1"
+    local shell_args=()
+    local git_args=()
+    local ai_args=()
+    local launcher_arg
+
+    DEV_SESSION_LAYOUT="$(mktemp)"
+
+    shell_args=(
+        "shell"
+        "--workspace"
+        "$PROJECT_ROOT"
+        "--project-name"
+        "$PROJECT_NAME"
+    )
+
+    git_args=(
+        "tool"
+        "git"
+        "--workspace"
+        "$PROJECT_ROOT"
+        "--project-name"
+        "$PROJECT_NAME"
+    )
+
+    ai_args=(
+        "tool"
+        "ai"
+        "--workspace"
+        "$PROJECT_ROOT"
+        "--project-name"
+        "$PROJECT_NAME"
+    )
+
+    if [[ -n "$SERVICE_OVERRIDE" ]]; then
+        shell_args+=("--service" "$SERVICE_OVERRIDE")
+        git_args+=("--service" "$SERVICE_OVERRIDE")
+        ai_args+=("--service" "$SERVICE_OVERRIDE")
+    fi
+
+    {
+        printf 'layout {\n'
+        printf '    default_tab_template {\n'
+        printf '        pane size=1 borderless=true {\n'
+        printf '            plugin location="zellij:tab-bar"\n'
+        printf '        }\n'
+        printf '        children\n'
+        printf '        pane size=2 borderless=true {\n'
+        printf '            plugin location="zellij:status-bar"\n'
+        printf '        }\n'
+        printf '    }\n'
+        printf '    tab name="vibe" cwd="%s" split_direction="vertical" hide_floating_panes=true {\n' "$(kdl_escape "$PROJECT_ROOT")"
+        printf '        pane split_direction="vertical" {\n'
+        printf '            pane size="60%%" name="git" command="%s" {\n' "$(kdl_escape "$launcher_path")"
+        printf '                args'
+        for launcher_arg in "${git_args[@]}"; do
+            printf ' "%s"' "$(kdl_escape "$launcher_arg")"
+        done
+        printf '\n'
+        printf '            }\n'
+        printf '            pane size="40%%" name="ai" focus=true command="%s" {\n' "$(kdl_escape "$launcher_path")"
+        printf '                args'
+        for launcher_arg in "${ai_args[@]}"; do
+            printf ' "%s"' "$(kdl_escape "$launcher_arg")"
+        done
+        printf '\n'
+        printf '            }\n'
+        printf '        }\n'
+        printf '        floating_panes {\n'
+        printf '            pane name="shell" x="5%%" y="68%%" width="90%%" height="28%%" command="%s" {\n' "$(kdl_escape "$launcher_path")"
+        printf '                args'
+        for launcher_arg in "${shell_args[@]}"; do
+            printf ' "%s"' "$(kdl_escape "$launcher_arg")"
+        done
+        printf '\n'
+        printf '            }\n'
+        printf '        }\n'
+        printf '    }\n'
+        printf '}\n'
+    } > "$DEV_SESSION_LAYOUT"
 }
 
 path_contains_directory() {
@@ -817,29 +1115,38 @@ normalize_helper_tool() {
         jq)
             printf 'jq\n'
             ;;
-        tmux)
-            printf 'tmux\n'
-            ;;
         helix|hx)
             printf 'helix\n'
+            ;;
+        micro)
+            printf 'micro\n'
             ;;
         git)
             printf 'git\n'
             ;;
-        lapce)
-            printf 'lapce\n'
-            ;;
-        copilot|copilot-cli|github-copilot-cli)
-            printf 'copilot\n'
-            ;;
         yazi)
             printf 'yazi\n'
+            ;;
+        lazygit)
+            printf 'lazygit\n'
+            ;;
+        zellij)
+            printf 'zellij\n'
             ;;
         ranger)
             printf 'ranger\n'
             ;;
         lf)
             printf 'lf\n'
+            ;;
+        eza)
+            printf 'eza\n'
+            ;;
+        tree)
+            printf 'tree\n'
+            ;;
+        copilot|copilot-cli|github-copilot-cli)
+            printf 'copilot\n'
             ;;
         *)
             printf '%s\n' "$1"
@@ -849,7 +1156,7 @@ normalize_helper_tool() {
 
 host_tool_supported() {
     case "$1" in
-        jq|tmux|helix|lapce|copilot)
+        jq|git|helix|micro|lf|yazi|lazygit|zellij)
             return 0
             ;;
     esac
@@ -858,7 +1165,7 @@ host_tool_supported() {
 
 container_tool_supported() {
     case "$1" in
-        jq|tmux|helix|git|yazi|ranger|lf|copilot)
+        jq|helix|micro|git|yazi|ranger|lf|eza|tree|lazygit|copilot)
             return 0
             ;;
     esac
@@ -867,20 +1174,26 @@ container_tool_supported() {
 
 host_tool_list() {
     printf 'jq\n'
-    printf 'tmux\n'
+    printf 'git\n'
     printf 'helix\n'
-    printf 'lapce\n'
-    printf 'copilot\n'
+    printf 'micro\n'
+    printf 'lf\n'
+    printf 'yazi\n'
+    printf 'lazygit\n'
+    printf 'zellij\n'
 }
 
 container_tool_list() {
     printf 'jq\n'
-    printf 'tmux\n'
     printf 'helix\n'
+    printf 'micro\n'
     printf 'git\n'
     printf 'yazi\n'
     printf 'ranger\n'
     printf 'lf\n'
+    printf 'eza\n'
+    printf 'tree\n'
+    printf 'lazygit\n'
     printf 'copilot\n'
 }
 
@@ -926,17 +1239,11 @@ host_has_tool() {
     local tool="$1"
 
     case "$tool" in
-        jq|tmux)
+        jq|git|lf|yazi|lazygit|zellij|micro)
             command -v "$tool" >/dev/null 2>&1
             ;;
         helix)
             command -v hx >/dev/null 2>&1
-            ;;
-        lapce)
-            command -v lapce >/dev/null 2>&1
-            ;;
-        copilot)
-            command -v copilot >/dev/null 2>&1
             ;;
         *)
             return 1
@@ -989,31 +1296,9 @@ detect_host_package_manager() {
 }
 
 host_package_install_command() {
-    local package_manager="$1"
-    shift
-    local -a packages=("$@")
-    local joined_packages="${packages[*]}"
-
-    case "$package_manager" in
-        apt-get)
-            printf 'sudo apt-get update && sudo apt-get install -y %s\n' "$joined_packages"
-            ;;
-        dnf)
-            printf 'sudo dnf install -y %s\n' "$joined_packages"
-            ;;
-        pacman)
-            printf 'sudo pacman -Sy --noconfirm %s\n' "$joined_packages"
-            ;;
-        zypper)
-            printf 'sudo zypper --non-interactive install %s\n' "$joined_packages"
-            ;;
-        apk)
-            printf 'sudo apk add --no-cache %s\n' "$joined_packages"
-            ;;
-        *)
-            die "Unsupported package manager '$package_manager'"
-            ;;
-    esac
+    printf 'DEVENV_INSTALL_SCOPE=host\nDEVENV_NEEDS_SUDO=1\nDEVENV_PACKAGES=%s\n%s\n' \
+        "$(shell_escape "$*")" \
+        "$(script_asset_content "scripts/install/packages.sh")"
 }
 
 run_or_print_host_command() {
@@ -1032,26 +1317,59 @@ command_host_tool_install() {
     local -a package_tools=()
     local tool
 
-    require_tool_args "No host tools provided. Use: devenv host-tool install <jq|tmux|helix|lapce|copilot ...>"
+    require_tool_args "No host tools provided. Use: devenv host-tool install <jq|git|helix|micro|lf|yazi|lazygit|zellij ...>"
     validate_tool_args host
+
+    package_manager="$(detect_host_package_manager)"
 
     for tool in "${TOOL_ARGS[@]}"; do
         case "$tool" in
-            jq|tmux|helix)
+            jq|git|helix|lf)
                 package_tools+=("$tool")
                 ;;
-            lapce)
-                run_or_print_host_command 'set -eu; arch="$(uname -m)"; case "$arch" in x86_64|amd64) lapce_arch="amd64" ;; aarch64|arm64) lapce_arch="arm64" ;; *) echo "devenv: unsupported Lapce host architecture: $arch" >&2; exit 1 ;; esac; tmpdir="$(mktemp -d)"; trap '\''rm -rf "$tmpdir"'\'' EXIT; mkdir -p "$HOME/.local/bin" "$HOME/.local/share/lapce"; curl -fsSL "https://github.com/lapce/lapce/releases/latest/download/lapce-linux-${lapce_arch}.tar.gz" -o "$tmpdir/lapce.tar.gz"; tar -xzf "$tmpdir/lapce.tar.gz" -C "$tmpdir"; install -m 0755 "$tmpdir/lapce/lapce" "$HOME/.local/bin/lapce"; if [[ -f "$tmpdir/lapce/lapce-proxy" ]]; then install -m 0755 "$tmpdir/lapce/lapce-proxy" "$HOME/.local/share/lapce/lapce-proxy"; fi'
+            micro)
+                run_or_print_host_command "DEVENV_NEEDS_SUDO=0
+DEVENV_INSTALL_BIN_DIR=$(shell_escape "$HOME/.local/bin")
+$(script_asset_content "scripts/install/micro.sh")"
                 ;;
-            copilot)
-                run_or_print_host_command 'curl -fsSL https://gh.io/copilot-install | bash'
+            yazi)
+                case "$package_manager" in
+                    apt-get)
+                        run_or_print_host_command "DEVENV_INSTALL_SCOPE=host
+DEVENV_NEEDS_SUDO=1
+DEVENV_YAZI_VERSION=$(shell_escape "$YAZI_HOST_VERSION")
+DEVENV_ALLOW_APT_RELEASE=1
+$(script_asset_content "scripts/install/yazi.sh")"
+                        ;;
+                    dnf)
+                        run_or_print_host_command "DEVENV_INSTALL_SCOPE=host
+DEVENV_NEEDS_SUDO=1
+DEVENV_YAZI_VERSION=$(shell_escape "$YAZI_HOST_VERSION")
+DEVENV_ALLOW_DNF_PACKAGE=1
+$(script_asset_content "scripts/install/yazi.sh")"
+                        ;;
+                    *)
+                        die "Host tool 'yazi' is currently supported on apt-based and dnf-based systems only"
+                        ;;
+                esac
+                ;;
+            lazygit)
+                run_or_print_host_command "DEVENV_INSTALL_SCOPE=host
+DEVENV_NEEDS_SUDO=1
+DEVENV_LAZYGIT_VERSION=$(shell_escape "$LAZYGIT_VERSION")
+DEVENV_ALLOW_DNF_COPR=1
+$(script_asset_content "scripts/install/lazygit.sh")"
+                ;;
+            zellij)
+                run_or_print_host_command "DEVENV_ZELLIJ_VERSION=$(shell_escape "0.43.1")
+DEVENV_INSTALL_BIN_DIR=$(shell_escape "$HOME/.local/bin")
+$(script_asset_content "scripts/install/zellij.sh")"
                 ;;
         esac
     done
 
     if [[ ${#package_tools[@]} -gt 0 ]]; then
-        package_manager="$(detect_host_package_manager)"
-        run_or_print_host_command "$(host_package_install_command "$package_manager" "${package_tools[@]}")"
+        run_or_print_host_command "$(host_package_install_command "${package_tools[@]}")"
     fi
 
     if [[ $PRINT_ONLY -eq 0 ]]; then
@@ -1063,7 +1381,7 @@ command_host_tool_install() {
 
 container_has_tool_script() {
     case "$1" in
-        jq|tmux|git|ranger|lf)
+        jq|git|ranger|lf|eza|tree|lazygit|micro)
             printf 'command -v %s >/dev/null 2>&1\n' "$1"
             ;;
         helix)
@@ -1087,6 +1405,15 @@ run_container_shell_script() {
     local -a exec_args=()
 
     mapfile -d '' -t exec_args < <(docker_exec_base non-interactive "$container_id")
+    "${exec_args[@]}" sh -lc "$script"
+}
+
+run_container_shell_script_as_root() {
+    local container_id="$1"
+    local script="$2"
+    local -a exec_args=()
+
+    mapfile -d '' -t exec_args < <(docker_exec_base non-interactive "$container_id" root)
     "${exec_args[@]}" sh -lc "$script"
 }
 
@@ -1115,36 +1442,27 @@ command_container_tool_check() {
 }
 
 container_package_install_script() {
-    local joined_packages="$1"
-    cat <<EOF
-set -eu
-run_as_root() {
-  if [ "\$(id -u)" -eq 0 ]; then
-    "\$@"
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo "\$@"
-  else
-    echo "devenv: need root or sudo inside the container to install packages" >&2
-    exit 1
-  fi
+    printf 'DEVENV_INSTALL_SCOPE=container\nDEVENV_NEEDS_SUDO=0\nDEVENV_PACKAGES=%s\n%s\n' \
+        "$(shell_escape "$1")" \
+        "$(script_asset_content "scripts/install/packages.sh")"
 }
 
-if command -v apt-get >/dev/null 2>&1; then
-  run_as_root apt-get update
-  run_as_root apt-get install -y ${joined_packages}
-elif command -v dnf >/dev/null 2>&1; then
-  run_as_root dnf install -y ${joined_packages}
-elif command -v pacman >/dev/null 2>&1; then
-  run_as_root pacman -Sy --noconfirm ${joined_packages}
-elif command -v zypper >/dev/null 2>&1; then
-  run_as_root zypper --non-interactive install ${joined_packages}
-elif command -v apk >/dev/null 2>&1; then
-  run_as_root apk add --no-cache ${joined_packages}
-else
-  echo "devenv: no supported package manager found in the container" >&2
-  exit 1
-fi
-EOF
+container_yazi_install_script() {
+    printf 'DEVENV_INSTALL_SCOPE=container\nDEVENV_NEEDS_SUDO=0\nDEVENV_YAZI_VERSION=%s\nDEVENV_ALLOW_APT_RELEASE=1\nDEVENV_ALLOW_DNF_PACKAGE=1\nDEVENV_ALLOW_PACMAN_PACKAGE=1\nDEVENV_ALLOW_ZYPPER_PACKAGE=1\nDEVENV_ALLOW_APK_PACKAGE=1\n%s\n' \
+        "$(shell_escape "$YAZI_HOST_VERSION")" \
+        "$(script_asset_content "scripts/install/yazi.sh")"
+}
+
+container_eza_install_script() {
+    printf 'DEVENV_INSTALL_SCOPE=container\nDEVENV_NEEDS_SUDO=0\nDEVENV_INSTALL_BIN_DIR=/usr/local/bin\nDEVENV_EZA_VERSION=%s\nDEVENV_ALLOW_APT_RELEASE=1\nDEVENV_ALLOW_DNF_PACKAGE=1\nDEVENV_ALLOW_PACMAN_PACKAGE=1\nDEVENV_ALLOW_ZYPPER_PACKAGE=1\nDEVENV_ALLOW_APK_PACKAGE=1\n%s\n' \
+        "$(shell_escape "$EZA_VERSION")" \
+        "$(script_asset_content "scripts/install/eza.sh")"
+}
+
+container_lazygit_install_script() {
+    printf 'DEVENV_INSTALL_SCOPE=container\nDEVENV_NEEDS_SUDO=0\nDEVENV_INSTALL_BIN_DIR=/usr/local/bin\nDEVENV_LAZYGIT_VERSION=%s\nDEVENV_ALLOW_APT_RELEASE=1\nDEVENV_ALLOW_DNF_PACKAGE=1\nDEVENV_ALLOW_PACMAN_PACKAGE=1\nDEVENV_ALLOW_ZYPPER_PACKAGE=1\nDEVENV_ALLOW_APK_PACKAGE=1\n%s\n' \
+        "$(shell_escape "$LAZYGIT_VERSION")" \
+        "$(script_asset_content "scripts/install/lazygit.sh")"
 }
 
 command_container_tool_install() {
@@ -1154,14 +1472,28 @@ command_container_tool_install() {
     local tool
     local script
 
-    require_tool_args "No container tools provided. Use: devenv container-tool install <jq|tmux|helix|git|yazi|ranger|lf|copilot ...>"
+    require_tool_args "No container tools provided. Use: devenv container-tool install <jq|helix|micro|git|yazi|ranger|lf|eza|tree|lazygit|copilot ...>"
     validate_tool_args container
 
     if [[ $PRINT_ONLY -eq 1 ]]; then
         for tool in "${TOOL_ARGS[@]}"; do
             case "$tool" in
-                jq|tmux|helix|git|yazi|ranger|lf)
+                jq|helix|git|ranger|lf|tree)
                     package_tools+=("$tool")
+                    ;;
+                micro)
+                    printf '%s\n' "DEVENV_NEEDS_SUDO=0
+DEVENV_INSTALL_BIN_DIR=/usr/local/bin
+$(script_asset_content "scripts/install/micro.sh")"
+                    ;;
+                yazi)
+                    printf '%s\n' "$(container_yazi_install_script)"
+                    ;;
+                eza)
+                    printf '%s\n' "$(container_eza_install_script)"
+                    ;;
+                lazygit)
+                    printf '%s\n' "$(container_lazygit_install_script)"
                     ;;
                 copilot)
                     printf '%s\n' 'curl -fsSL https://gh.io/copilot-install | bash'
@@ -1180,8 +1512,22 @@ command_container_tool_install() {
 
     for tool in "${TOOL_ARGS[@]}"; do
         case "$tool" in
-            jq|tmux|helix|git|yazi|ranger|lf)
+            jq|helix|git|ranger|lf|tree)
                 package_tools+=("$tool")
+                ;;
+            micro)
+                run_container_shell_script_as_root "$container_id" "DEVENV_NEEDS_SUDO=0
+DEVENV_INSTALL_BIN_DIR=/usr/local/bin
+$(script_asset_content "scripts/install/micro.sh")"
+                ;;
+            yazi)
+                run_container_shell_script_as_root "$container_id" "$(container_yazi_install_script)"
+                ;;
+            eza)
+                run_container_shell_script_as_root "$container_id" "$(container_eza_install_script)"
+                ;;
+            lazygit)
+                run_container_shell_script_as_root "$container_id" "$(container_lazygit_install_script)"
                 ;;
             copilot)
                 run_container_shell_script "$container_id" 'curl -fsSL https://gh.io/copilot-install | bash'
@@ -1192,7 +1538,7 @@ command_container_tool_install() {
     if [[ ${#package_tools[@]} -gt 0 ]]; then
         joined_packages="${package_tools[*]}"
         script="$(container_package_install_script "$joined_packages")"
-        run_container_shell_script "$container_id" "$script"
+        run_container_shell_script_as_root "$container_id" "$script"
     fi
 }
 
@@ -1254,18 +1600,7 @@ command_install() {
 
     rm -f "$target_path"
 
-    case "$INSTALL_MODE" in
-        copy)
-            cp "$source_path" "$target_path"
-            chmod +x "$target_path"
-            ;;
-        symlink)
-            ln -s "$source_path" "$target_path"
-            ;;
-        *)
-            die "Unsupported install mode '$INSTALL_MODE'. Use copy or symlink."
-            ;;
-    esac
+    ln -s "$source_path" "$target_path"
 
     print_success "Installed devenv to $target_path"
     if ! path_contains_directory "$INSTALL_PREFIX"; then
@@ -1325,19 +1660,22 @@ ensure_service_container() {
 }
 
 docker_exec_base() {
+    local exec_mode="$1"
+    local container_id="$2"
+    local exec_user="${3:-$REMOTE_USER}"
     local -a command=(docker exec)
-    if [[ "$1" == "interactive" ]]; then
+    if [[ "$exec_mode" == "interactive" ]]; then
         command+=(-it)
     else
         command+=(-i)
     fi
 
-    if [[ -n "$REMOTE_USER" ]]; then
-        command+=(-u "$REMOTE_USER")
+    if [[ -n "$exec_user" ]]; then
+        command+=(-u "$exec_user")
     fi
 
     command+=("${REMOTE_ENV_ARGS[@]}")
-    command+=(-w "$WORKSPACE_FOLDER" "$2")
+    command+=(-w "$WORKSPACE_FOLDER" "$container_id")
     printf '%s\0' "${command[@]}"
 }
 
@@ -1619,6 +1957,7 @@ wait_for_exec_ready() {
 
 start_stack() {
     local -a up_args=(up -d)
+    local -a build_args=()
     local previous_container_id previous_running current_container_id
 
     previous_container_id="$(service_container_id)"
@@ -1629,16 +1968,35 @@ start_stack() {
     print_step "Starting environment '$DISPLAY_NAME'"
 
     if [[ "$SCENARIO" == "compose" ]]; then
+        if [[ $NO_CACHE_BUILD -eq 1 ]]; then
+            build_args=(build --no-cache)
+            up_args+=(--force-recreate)
+            if [[ ${#RUN_SERVICES[@]} -gt 0 ]]; then
+                build_args+=("${RUN_SERVICES[@]}")
+            fi
+            compose "${build_args[@]}"
+        fi
+
         if [[ ${#RUN_SERVICES[@]} -gt 0 ]]; then
             up_args+=("${RUN_SERVICES[@]}")
         fi
         compose "${up_args[@]}"
     else
+        if [[ $NO_CACHE_BUILD -eq 1 && -n "$previous_container_id" ]]; then
+            docker rm -f "$previous_container_id" >/dev/null 2>&1 || true
+            previous_container_id=""
+            previous_running="false"
+        fi
+
         if [[ -n "$previous_container_id" ]]; then
             docker start "$previous_container_id" >/dev/null
         else
             print_step "Building image '$IMAGE_NAME'"
-            docker build -t "$IMAGE_NAME" "${BUILD_ARGS[@]}" -f "$DOCKERFILE_PATH" "$BUILD_CONTEXT_PATH"
+            if [[ $NO_CACHE_BUILD -eq 1 ]]; then
+                docker build --no-cache -t "$IMAGE_NAME" "${BUILD_ARGS[@]}" -f "$DOCKERFILE_PATH" "$BUILD_CONTEXT_PATH"
+            else
+                docker build -t "$IMAGE_NAME" "${BUILD_ARGS[@]}" -f "$DOCKERFILE_PATH" "$BUILD_CONTEXT_PATH"
+            fi
 
             print_step "Creating container '$CONTAINER_NAME'"
             docker run -d \
@@ -1778,18 +2136,25 @@ command_exec() {
 }
 
 tool_help() {
-    cat <<'EOF'
-Available tools:
-  helix  Launch Helix (`hx`) in the workspace.
-  tmux   Create or attach to a tmux session named `devenv`.
-  files  Launch a terminal file browser, or fall back to a directory listing.
-
-Examples:
-  devenv tool helix
-  devenv tool helix -- src/index.js
-  devenv tool tmux
-  devenv tool files
-EOF
+    printf '%s\n' 'Available tools:'
+    printf '%s\n' '  helix  Launch Helix (`hx`) in the workspace.'
+    printf '%s\n' '  micro  Launch Micro in the workspace.'
+    printf '%s\n' '  tmux   Create or attach to a tmux session named `devenv`.'
+    printf '%s\n' '  files  Launch a terminal file browser, or fall back to a directory listing.'
+    printf '%s\n' '  tree   Launch a compact project tree view.'
+    printf '%s\n' '  git    Launch a git TUI, or fall back to `git status` in a shell.'
+    printf '%s\n' '  ai     Launch Copilot in the container, or fall back to Gemini if present.'
+    printf '\n'
+    printf '%s\n' 'Examples:'
+    printf '%s\n' '  devenv tool helix'
+    printf '%s\n' '  devenv tool helix -- src/index.js'
+    printf '%s\n' '  devenv tool micro'
+    printf '%s\n' '  devenv tool micro -- src/index.js'
+    printf '%s\n' '  devenv tool tmux'
+    printf '%s\n' '  devenv tool files'
+    printf '%s\n' '  devenv tool tree'
+    printf '%s\n' '  devenv tool git'
+    printf '%s\n' '  devenv tool ai'
 }
 
 command_tool() {
@@ -1797,28 +2162,43 @@ command_tool() {
     local -a exec_args=()
     local -a tool_args=("${EXEC_ARGS[@]}")
     local tool_script=""
+    local tool_script_path=""
     local exit_code=0
 
-    [[ -n "$TOOL_NAME" ]] || die "No tool provided. Use: devenv tool <helix|tmux|files> [-- args...]"
+    [[ -n "$TOOL_NAME" ]] || die "No tool provided. Use: devenv tool <helix|micro|tmux|files|tree|git|ai> [-- args...]"
 
     case "$TOOL_NAME" in
         helix)
-            tool_script='if ! command -v hx >/dev/null 2>&1; then echo "devenv: tool '\''helix'\'' requires `hx` in the container image. Install Helix in this repo\''s devcontainer." >&2; exit 127; fi; if [[ $# -eq 0 ]]; then set -- .; fi; exec hx "$@"'
+            tool_script_path="scripts/tool/helix.sh"
+            ;;
+        micro)
+            tool_script_path="scripts/tool/micro.sh"
             ;;
         tmux)
-            tool_script='if ! command -v tmux >/dev/null 2>&1; then echo "devenv: tool '\''tmux'\'' requires `tmux` in the container image. Install tmux in this repo\''s devcontainer." >&2; exit 127; fi; if [[ $# -eq 0 ]]; then if tmux has-session -t devenv 2>/dev/null; then exec tmux attach -t devenv; else exec tmux new -s devenv; fi; fi; exec tmux "$@"'
+            tool_script_path="scripts/tool/tmux.sh"
             ;;
         files)
-            tool_script='if [[ $# -eq 0 ]]; then set -- .; fi; if command -v yazi >/dev/null 2>&1; then exec yazi "$@"; fi; if command -v ranger >/dev/null 2>&1; then exec ranger "$@"; fi; if command -v lf >/dev/null 2>&1; then exec lf "$@"; fi; if command -v eza >/dev/null 2>&1; then exec eza -la --group-directories-first "$@"; fi; exec ls -la "$@"'
+            tool_script_path="scripts/tool/files.sh"
+            ;;
+        tree)
+            tool_script_path="scripts/tool/tree.sh"
+            ;;
+        git)
+            tool_script_path="scripts/tool/git.sh"
+            ;;
+        ai)
+            tool_script_path="scripts/tool/ai.sh"
             ;;
         help|-h|--help)
             tool_help
             return 0
             ;;
         *)
-            die "Unknown tool '$TOOL_NAME'. Use: devenv tool <helix|tmux|files>"
+                die "Unknown tool '$TOOL_NAME'. Use: devenv tool <helix|micro|tmux|files|tree|git|ai>"
             ;;
     esac
+
+            tool_script="$(script_asset_content "$tool_script_path")"
 
     container_id="$(ensure_running)"
     print_step "Opening tool '$TOOL_NAME' in service '$SERVICE_NAME'"
@@ -1858,6 +2238,46 @@ command_host_tmux() {
     tmux attach-session -t "$session_name"
 }
 
+command_dev() {
+    local launcher_path
+    local exit_code=0
+
+    require_command zellij "Install zellij on the host to use dev sessions."
+
+    launcher_path="$(self_path)"
+    ensure_running >/dev/null
+    write_dev_session_layout "$launcher_path"
+
+    print_step "Starting zellij dev session for '$PROJECT_NAME'"
+    zellij --layout "$DEV_SESSION_LAYOUT" || exit_code=$?
+
+    if [[ $REMOVE_ON_EXIT -eq 1 ]]; then
+        stop_stack
+    fi
+
+    return $exit_code
+}
+
+command_vibe() {
+    local launcher_path
+    local exit_code=0
+
+    require_command zellij "Install zellij on the host to use vibe sessions."
+
+    launcher_path="$(self_path)"
+    ensure_running >/dev/null
+    write_vibe_session_layout "$launcher_path"
+
+    print_step "Starting zellij vibe session for '$PROJECT_NAME'"
+    zellij --layout "$DEV_SESSION_LAYOUT" || exit_code=$?
+
+    if [[ $REMOVE_ON_EXIT -eq 1 ]]; then
+        stop_stack
+    fi
+
+    return $exit_code
+}
+
 command_logs() {
     if [[ "$SCENARIO" == "compose" ]]; then
         if [[ -n "$SERVICE_OVERRIDE" ]]; then
@@ -1889,6 +2309,7 @@ Primary service:  $SERVICE_NAME
 Remote user:      ${REMOTE_USER:-<container default>}
 Workspace folder: $WORKSPACE_FOLDER
 SSH agent:        $(if [[ $AUTO_SSH_AGENT_FORWARDING -eq 1 ]]; then printf 'auto -> %s' "$AUTO_SSH_AGENT_TARGET"; else printf 'disabled'; fi)
+Host dotdirs:     $(if [[ ${#AUTO_HOST_MOUNT_SOURCES[@]} -gt 0 ]]; then printf '%s' "${AUTO_HOST_MOUNT_SOURCES[*]}"; else printf 'none'; fi)
 Forward ports:    $(if [[ ${#FORWARD_PORTS[@]} -gt 0 ]]; then printf '%s' "${FORWARD_PORTS[*]}"; else printf 'none'; fi)
 EOF
 
@@ -1925,7 +2346,7 @@ parse_args() {
 
     if [[ $# -gt 0 ]]; then
         case "$1" in
-            open|up|down|shell|exec|tool|host-tool|container-tool|host-tmux|logs|ps|config|check|install|uninstall|help)
+            dev|vibe|ide|open|up|down|shell|exec|tool|host-tool|container-tool|host-tmux|logs|ps|config|check|install|uninstall|help)
                 COMMAND="$1"
                 explicit_command=1
                 shift
@@ -1974,13 +2395,12 @@ parse_args() {
                 INSTALL_PREFIX="$2"
                 shift 2
                 ;;
-            --mode)
-                [[ $# -ge 2 ]] || die "Missing value for $1"
-                INSTALL_MODE="$2"
-                shift 2
-                ;;
             --force)
                 FORCE_INSTALL=1
+                shift
+                ;;
+            --no-cache)
+                NO_CACHE_BUILD=1
                 shift
                 ;;
             --rm)
@@ -2054,6 +2474,9 @@ main() {
             usage
             return 0
             ;;
+        ide)
+            COMMAND="dev"
+            ;;
         tool)
             if [[ -z "$TOOL_NAME" || "$TOOL_NAME" == "help" || "$TOOL_NAME" == "-h" || "$TOOL_NAME" == "--help" ]]; then
                 tool_help
@@ -2070,7 +2493,7 @@ main() {
                 return 0
             fi
             ;;
-        host-tmux)
+        dev|vibe|host-tmux)
             ;;
         install)
             command_install
@@ -2091,10 +2514,16 @@ main() {
         check)
             command_check
             ;;
-        up|down|shell|exec|tool|container-tool|host-tmux|logs|ps|open)
+        dev|vibe|up|down|shell|exec|tool|container-tool|host-tmux|logs|ps|open)
             require_runtime_prereqs
             emit_spec_warnings
             case "$COMMAND" in
+                dev)
+                    command_dev
+                    ;;
+                vibe)
+                    command_vibe
+                    ;;
                 open)
                     command_open
                     ;;
