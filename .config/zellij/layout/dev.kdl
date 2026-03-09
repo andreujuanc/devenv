@@ -9,7 +9,7 @@ layout {
         }
     }
 
-    tab name="dev" cwd="." split_direction="horizontal" hide_floating_panes=true {
+    tab name="dev" cwd="." split_direction="vertical" hide_floating_panes=true {
         pane size="68%" name="micro" focus=true command="devenv" {
             args "tool" "micro"
         }

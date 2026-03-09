@@ -103,7 +103,7 @@ devenv up [--workspace PATH] [--project-name NAME] [--no-cache]
 devenv down [--workspace PATH] [--project-name NAME]
 devenv shell [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache]
 devenv exec [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] -- <command> [args...]
-devenv tool <helix|micro|tmux|files|tree|git|ai> [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [-- args...]
+devenv tool <helix|micro|fresh|tmux|files|tree|git|ai> [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [-- args...]
 devenv host-tool <list|check|install> [tool...] [--print]
 devenv container-tool <list|check|install> [tool...] [--print]
 devenv host-tmux [--workspace PATH] [--project-name NAME] [--service NAME]
@@ -247,7 +247,7 @@ Those panes stay visible because each one is an interactive shell. Run long-live
 
 ### Host Tools
 
-Use `host-tool` for things that belong on the machine running `devenv`, such as `jq`, `git`, `helix`, `micro`, `lazygit`, `lf`, `yazi`, and `zellij`.
+Use `host-tool` for things that belong on the machine running `devenv`, such as `jq`, `git`, `helix`, `micro`, `fresh`, `lazygit`, `lf`, `yazi`, and `zellij`.
 
 List supported host tools:
 
@@ -258,18 +258,18 @@ devenv host-tool list
 Check what is installed:
 
 ```bash
-devenv host-tool check jq git helix micro lf yazi lazygit zellij
+devenv host-tool check jq git helix micro fresh lf yazi lazygit zellij
 ```
 
 Install host tools:
 
 ```bash
-devenv host-tool install jq git helix micro
+devenv host-tool install jq git helix micro fresh
 devenv host-tool install lf zellij
 devenv host-tool install yazi lazygit
 ```
 
-`devenv dev` no longer depends on `lf` or `yazi` on the host. They remain available as optional host utilities if you want them separately. `micro` installs with the official `getmic.ro` bootstrap script into `~/.local/bin`. `yazi` installs from the official release musl-linked `.deb` on apt-based systems and via Fedora COPR on `dnf`-based systems. `lazygit` currently uses a Fedora COPR install via `dnf`, and `zellij` installs from the matching `x86_64` or `aarch64` Linux release tarball.
+`devenv dev` no longer depends on `lf` or `yazi` on the host. They remain available as optional host utilities if you want them separately. `micro` installs with the official `getmic.ro` bootstrap script into `~/.local/bin`. `fresh` installs from the upstream Linux release tarball into `~/.local/share/fresh-editor` with a `~/.local/bin/fresh` symlink. `yazi` installs from the official release musl-linked `.deb` on apt-based systems and via Fedora COPR on `dnf`-based systems. `lazygit` currently uses a Fedora COPR install via `dnf`, and `zellij` installs from the matching `x86_64` or `aarch64` Linux release tarball.
 
 Current host install flows:
 
@@ -300,13 +300,13 @@ devenv container-tool list
 Preview install commands without running them:
 
 ```bash
-devenv container-tool install --print jq helix micro git yazi copilot
+devenv container-tool install --print jq helix micro fresh git yazi copilot
 ```
 
 Install tools in the current container:
 
 ```bash
-devenv container-tool install jq helix micro git yazi copilot
+devenv container-tool install jq helix micro fresh git yazi copilot
 ```
 
 Container-side installs are convenient, but they are not the source of truth. If the tooling matters for the repo, move it into the repo image later.
@@ -364,6 +364,7 @@ If a repo image already includes terminal tools, `devenv` can launch them direct
 ```bash
 devenv tool helix
 devenv tool micro
+devenv tool fresh
 devenv tool files
 ```
 

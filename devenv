@@ -6,6 +6,7 @@ VERSION="0.1.0"
 YAZI_HOST_VERSION="26.1.22"
 EZA_VERSION="0.23.4"
 LAZYGIT_VERSION="0.59.0"
+FRESH_VERSION="0.2.14"
 DEFAULT_DEVCONTAINER_JSON=".devcontainer/devcontainer.json"
 FALLBACK_DEVCONTAINER_JSON=".devcontainer.json"
 DEFAULT_INSTALL_PREFIX="${HOME}/.local/bin"
@@ -113,7 +114,7 @@ Usage:
     devenv down [--workspace PATH] [--project-name NAME]
     devenv shell [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache]
     devenv exec [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] -- <command> [args...]
-    devenv tool <helix|micro|tmux|files|tree|git|ai> [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [-- args...]
+    devenv tool <helix|micro|fresh|tmux|files|tree|git|ai> [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [-- args...]
     devenv host-tool <list|check|install> [tool...] [--print]
     devenv container-tool <list|check|install> [tool...] [--print]
     devenv host-tmux [--workspace PATH] [--project-name NAME] [--service NAME]
@@ -172,8 +173,8 @@ host_tool_help() {
         cat <<'EOF'
 Usage:
     devenv host-tool list
-    devenv host-tool check [jq|git|helix|micro|lf|yazi|lazygit|zellij ...]
-    devenv host-tool install <jq|git|helix|micro|lf|yazi|lazygit|zellij ...> [--print]
+    devenv host-tool check [jq|git|helix|micro|fresh|lf|yazi|lazygit|zellij ...]
+    devenv host-tool install <jq|git|helix|micro|fresh|lf|yazi|lazygit|zellij ...> [--print]
 
 Notes:
     - Host installs are Linux-oriented and depend on the available package manager.
@@ -188,8 +189,8 @@ container_tool_help() {
         cat <<'EOF'
 Usage:
     devenv container-tool list
-    devenv container-tool check [jq|helix|micro|git|yazi|ranger|lf|lazygit|copilot ...]
-    devenv container-tool install <jq|helix|micro|git|yazi|ranger|lf|lazygit|copilot ...> [--print]
+    devenv container-tool check [jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot ...]
+    devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot ...> [--print]
 
 Notes:
     - Container installs are mutable and can disappear when the container is recreated.
@@ -1024,7 +1025,7 @@ write_dev_session_layout() {
         printf '            plugin location="zellij:status-bar"\n'
         printf '        }\n'
         printf '    }\n'
-        printf '    tab name="dev" cwd="%s" split_direction="horizontal" hide_floating_panes=true {\n' "$(kdl_escape "$PROJECT_ROOT")"
+        printf '    tab name="dev" cwd="%s" split_direction="vertical" hide_floating_panes=true {\n' "$(kdl_escape "$PROJECT_ROOT")"
         printf '        pane size="68%%" name="micro" focus=true command="%s" {\n' "$(kdl_escape "$launcher_path")"
         printf '            args'
         for launcher_arg in "${micro_args[@]}"; do
@@ -1161,6 +1162,9 @@ normalize_helper_tool() {
         micro)
             printf 'micro\n'
             ;;
+        fresh)
+            printf 'fresh\n'
+            ;;
         git)
             printf 'git\n'
             ;;
@@ -1196,7 +1200,7 @@ normalize_helper_tool() {
 
 host_tool_supported() {
     case "$1" in
-        jq|git|helix|micro|lf|yazi|lazygit|zellij)
+        jq|git|helix|micro|fresh|lf|yazi|lazygit|zellij)
             return 0
             ;;
     esac
@@ -1205,7 +1209,7 @@ host_tool_supported() {
 
 container_tool_supported() {
     case "$1" in
-        jq|helix|micro|git|yazi|ranger|lf|eza|tree|lazygit|copilot)
+        jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot)
             return 0
             ;;
     esac
@@ -1217,6 +1221,7 @@ host_tool_list() {
     printf 'git\n'
     printf 'helix\n'
     printf 'micro\n'
+    printf 'fresh\n'
     printf 'lf\n'
     printf 'yazi\n'
     printf 'lazygit\n'
@@ -1227,6 +1232,7 @@ container_tool_list() {
     printf 'jq\n'
     printf 'helix\n'
     printf 'micro\n'
+    printf 'fresh\n'
     printf 'git\n'
     printf 'yazi\n'
     printf 'ranger\n'
@@ -1279,7 +1285,7 @@ host_has_tool() {
     local tool="$1"
 
     case "$tool" in
-        jq|git|lf|yazi|lazygit|zellij|micro)
+        jq|git|lf|yazi|lazygit|zellij|micro|fresh)
             command -v "$tool" >/dev/null 2>&1
             ;;
         helix)
@@ -1357,7 +1363,7 @@ command_host_tool_install() {
     local -a package_tools=()
     local tool
 
-    require_tool_args "No host tools provided. Use: devenv host-tool install <jq|git|helix|micro|lf|yazi|lazygit|zellij ...>"
+    require_tool_args "No host tools provided. Use: devenv host-tool install <jq|git|helix|micro|fresh|lf|yazi|lazygit|zellij ...>"
     validate_tool_args host
 
     package_manager="$(detect_host_package_manager)"
@@ -1371,6 +1377,14 @@ command_host_tool_install() {
                 run_or_print_host_command "DEVENV_NEEDS_SUDO=0
 DEVENV_INSTALL_BIN_DIR=$(shell_escape "$HOME/.local/bin")
 $(script_asset_content "scripts/install/micro.sh")"
+                ;;
+            fresh)
+                run_or_print_host_command "DEVENV_INSTALL_SCOPE=host
+DEVENV_NEEDS_SUDO=0
+DEVENV_INSTALL_ROOT=$(shell_escape "$HOME/.local/share/fresh-editor")
+DEVENV_INSTALL_BIN_DIR=$(shell_escape "$HOME/.local/bin")
+DEVENV_FRESH_VERSION=$(shell_escape "$FRESH_VERSION")
+$(script_asset_content "scripts/install/fresh.sh")"
                 ;;
             yazi)
                 case "$package_manager" in
@@ -1421,7 +1435,7 @@ $(script_asset_content "scripts/install/zellij.sh")"
 
 container_has_tool_script() {
     case "$1" in
-        jq|git|ranger|lf|eza|tree|lazygit|micro)
+        jq|git|ranger|lf|eza|tree|lazygit|micro|fresh)
             printf 'command -v %s >/dev/null 2>&1\n' "$1"
             ;;
         helix)
@@ -1512,7 +1526,7 @@ command_container_tool_install() {
     local tool
     local script
 
-    require_tool_args "No container tools provided. Use: devenv container-tool install <jq|helix|micro|git|yazi|ranger|lf|eza|tree|lazygit|copilot ...>"
+    require_tool_args "No container tools provided. Use: devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot ...>"
     validate_tool_args container
 
     if [[ $PRINT_ONLY -eq 1 ]]; then
@@ -1525,6 +1539,14 @@ command_container_tool_install() {
                     printf '%s\n' "DEVENV_NEEDS_SUDO=0
 DEVENV_INSTALL_BIN_DIR=/usr/local/bin
 $(script_asset_content "scripts/install/micro.sh")"
+                    ;;
+                fresh)
+                    printf '%s\n' "DEVENV_INSTALL_SCOPE=container
+DEVENV_NEEDS_SUDO=0
+DEVENV_INSTALL_ROOT=/usr/local/share/fresh-editor
+DEVENV_INSTALL_BIN_DIR=/usr/local/bin
+DEVENV_FRESH_VERSION=$(shell_escape "$FRESH_VERSION")
+$(script_asset_content "scripts/install/fresh.sh")"
                     ;;
                 yazi)
                     printf '%s\n' "$(container_yazi_install_script)"
@@ -1559,6 +1581,14 @@ $(script_asset_content "scripts/install/micro.sh")"
                 run_container_shell_script_as_root "$container_id" "DEVENV_NEEDS_SUDO=0
 DEVENV_INSTALL_BIN_DIR=/usr/local/bin
 $(script_asset_content "scripts/install/micro.sh")"
+                ;;
+            fresh)
+                run_container_shell_script_as_root "$container_id" "DEVENV_INSTALL_SCOPE=container
+DEVENV_NEEDS_SUDO=0
+DEVENV_INSTALL_ROOT=/usr/local/share/fresh-editor
+DEVENV_INSTALL_BIN_DIR=/usr/local/bin
+DEVENV_FRESH_VERSION=$(shell_escape "$FRESH_VERSION")
+$(script_asset_content "scripts/install/fresh.sh")"
                 ;;
             yazi)
                 run_container_shell_script_as_root "$container_id" "$(container_yazi_install_script)"
@@ -2221,6 +2251,7 @@ tool_help() {
     printf '%s\n' 'Available tools:'
     printf '%s\n' '  helix  Launch Helix (`hx`) in the workspace.'
     printf '%s\n' '  micro  Launch Micro in the workspace.'
+    printf '%s\n' '  fresh  Launch Fresh in the workspace.'
     printf '%s\n' '  tmux   Create or attach to a tmux session named `devenv`.'
     printf '%s\n' '  files  Launch a terminal file browser, or fall back to a directory listing.'
     printf '%s\n' '  tree   Launch a compact project tree view.'
@@ -2232,6 +2263,8 @@ tool_help() {
     printf '%s\n' '  devenv tool helix -- src/index.js'
     printf '%s\n' '  devenv tool micro'
     printf '%s\n' '  devenv tool micro -- src/index.js'
+    printf '%s\n' '  devenv tool fresh'
+    printf '%s\n' '  devenv tool fresh -- src/index.js'
     printf '%s\n' '  devenv tool tmux'
     printf '%s\n' '  devenv tool files'
     printf '%s\n' '  devenv tool tree'
@@ -2247,7 +2280,7 @@ command_tool() {
     local tool_script_path=""
     local exit_code=0
 
-    [[ -n "$TOOL_NAME" ]] || die "No tool provided. Use: devenv tool <helix|micro|tmux|files|tree|git|ai> [-- args...]"
+    [[ -n "$TOOL_NAME" ]] || die "No tool provided. Use: devenv tool <helix|micro|fresh|tmux|files|tree|git|ai> [-- args...]"
 
     case "$TOOL_NAME" in
         helix)
@@ -2255,6 +2288,9 @@ command_tool() {
             ;;
         micro)
             tool_script_path="scripts/tool/micro.sh"
+            ;;
+        fresh)
+            tool_script_path="scripts/tool/fresh.sh"
             ;;
         tmux)
             tool_script_path="scripts/tool/tmux.sh"
@@ -2276,7 +2312,7 @@ command_tool() {
             return 0
             ;;
         *)
-                die "Unknown tool '$TOOL_NAME'. Use: devenv tool <helix|micro|tmux|files|tree|git|ai>"
+                die "Unknown tool '$TOOL_NAME'. Use: devenv tool <helix|micro|fresh|tmux|files|tree|git|ai>"
             ;;
     esac
 

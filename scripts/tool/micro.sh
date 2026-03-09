@@ -4,8 +4,4 @@ if ! command -v micro >/dev/null 2>&1; then
     exit 127
 fi
 
-if [ "$#" -eq 0 ]; then
-    set -- .
-fi
-
 exec micro "$@"
