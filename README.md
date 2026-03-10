@@ -103,7 +103,7 @@ devenv up [--workspace PATH] [--project-name NAME] [--no-cache]
 devenv down [--workspace PATH] [--project-name NAME]
 devenv shell [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache]
 devenv exec [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] -- <command> [args...]
-devenv tool <helix|micro|fresh|tmux|files|tree|git|ai> [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [-- args...]
+devenv tool <helix|micro|fresh|editor|tmux|files|tree|git|ai> [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [-- args...]
 devenv host-tool <list|check|install> [tool...] [--print]
 devenv container-tool <list|check|install> [tool...] [--print]
 devenv host-tmux [--workspace PATH] [--project-name NAME] [--service NAME]
@@ -164,11 +164,14 @@ Open a Zellij workspace from the current repo:
 devenv dev
 ```
 
+The Zellij session title uses the devcontainer `name` field as-is.
+
 The generated dev layout now keeps the working panes inside the container:
 
-- main pane: container-scoped `devenv tool micro`
+- main pane: container-scoped `devenv tool editor`, preferring `fresh` and falling back to `micro`
 - right pane: container-scoped AI CLI via `devenv tool ai`, preferring `copilot`, then `gemini`, then `gemini-cli`
 - hidden floating shell pane: container shell via `devenv shell`, positioned near the bottom and toggled with `Alt-f`
+- additional Zellij panes opened during the session inherit a container shell instead of a host shell
 
 Recommended host tools:
 
@@ -180,10 +183,10 @@ devenv host-tool check zellij
 Recommended container tools for the dev layout:
 
 ```bash
-devenv container-tool install micro copilot
+devenv container-tool install fresh copilot
 ```
 
-`copilot` can be installed by `devenv`. Gemini is detected if your image already provides it.
+`copilot` can be installed by `devenv`. The container install links the resulting binary into `/usr/local/bin`, so plain shells inside the container can find it on `PATH`. Gemini is detected if your image already provides it.
 
 If you want to tear the environment down when you leave the Zellij session:
 
@@ -199,11 +202,14 @@ Open a simpler container-only Zellij workspace from the current repo:
 devenv vibe
 ```
 
+The Zellij session title uses the devcontainer `name` field as-is.
+
 The generated vibe layout keeps all working panes inside the container:
 
 - left pane: container-scoped git UI via `devenv tool git`, preferring `lazygit`, then `gitui`, then `git status`
 - right pane: container-scoped AI CLI via `devenv tool ai`, preferring `copilot`, then `gemini`, then `gemini-cli`
 - hidden floating shell pane: container shell via `devenv shell`, positioned near the bottom and toggled with Zellij's floating-pane shortcut
+- additional Zellij panes opened during the session inherit a container shell instead of a host shell
 
 By default, the shell starts hidden in `vibe`. Toggle it with `Alt-f`, which maps to Zellij's `ToggleFloatingPanes` action in the default keymap.
 
@@ -213,7 +219,7 @@ Recommended container tools for the vibe layout:
 devenv container-tool install lazygit copilot
 ```
 
-`copilot` can be installed by `devenv`. Gemini is detected if your image already provides it.
+`copilot` can be installed by `devenv`. The container install links the resulting binary into `/usr/local/bin`, so plain shells inside the container can find it on `PATH`. Gemini is detected if your image already provides it.
 
 If you want to tear the environment down when you leave the Zellij session:
 
@@ -309,7 +315,7 @@ Install tools in the current container:
 devenv container-tool install jq helix micro fresh git yazi copilot
 ```
 
-Container-side installs are convenient, but they are not the source of truth. If the tooling matters for the repo, move it into the repo image later.
+Container-side installs are convenient, but they are not the source of truth. If the tooling matters for the repo, move it into the repo image later. `copilot` is still installed via the upstream bootstrap, then linked into `/usr/local/bin` so regular container shells can resolve it without extra PATH setup.
 
 For package-manager based installs, `devenv` runs the install step as `root` with `docker exec -u root`, so the container does not need `sudo` for these mutable installs.
 
@@ -365,6 +371,7 @@ If a repo image already includes terminal tools, `devenv` can launch them direct
 devenv tool helix
 devenv tool micro
 devenv tool fresh
+devenv tool editor
 devenv tool files
 ```
 

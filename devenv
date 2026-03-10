@@ -49,6 +49,7 @@ AUTO_SSH_AGENT_TARGET="/tmp/devenv-ssh-agent.sock"
 AUTO_HOST_DOTDIR_MOUNTING=0
 COMPOSE_RUNTIME_OVERRIDE=""
 DEV_SESSION_LAYOUT=""
+DEV_SESSION_SHELL_LAUNCHER=""
 
 declare -a COMPOSE_FILES=()
 declare -a COMPOSE_ARGS=()
@@ -75,6 +76,10 @@ cleanup() {
 
     if [[ -n "$DEV_SESSION_LAYOUT" && -f "$DEV_SESSION_LAYOUT" ]]; then
         rm -f "$DEV_SESSION_LAYOUT"
+    fi
+
+    if [[ -n "$DEV_SESSION_SHELL_LAUNCHER" && -f "$DEV_SESSION_SHELL_LAUNCHER" ]]; then
+        rm -f "$DEV_SESSION_SHELL_LAUNCHER"
     fi
 }
 
@@ -114,7 +119,7 @@ Usage:
     devenv down [--workspace PATH] [--project-name NAME]
     devenv shell [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache]
     devenv exec [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] -- <command> [args...]
-    devenv tool <helix|micro|fresh|tmux|files|tree|git|ai> [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [-- args...]
+    devenv tool <helix|micro|fresh|editor|tmux|files|tree|git|ai> [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [-- args...]
     devenv host-tool <list|check|install> [tool...] [--print]
     devenv container-tool <list|check|install> [tool...] [--print]
     devenv host-tmux [--workspace PATH] [--project-name NAME] [--service NAME]
@@ -127,7 +132,7 @@ Usage:
     devenv help
 
 Commands:
-    dev        Start a host-side zellij workspace with container micro, AI, and shell panes.
+    dev        Start a host-side zellij workspace with a container editor, AI, and shell panes.
     vibe       Start a simplified host-side zellij workspace with container git, AI, and shell panes.
     ide        Alias for `dev`.
     open       Start the environment and attach a shell. Use --rm to stop it on shell exit.
@@ -973,10 +978,88 @@ kdl_escape() {
     printf '%s' "$value"
 }
 
+write_dev_session_shell_launcher() {
+    local launcher_path="$1"
+
+    DEV_SESSION_SHELL_LAUNCHER="$(mktemp)"
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf 'exec %s shell --workspace %s --project-name %s' \
+            "$(shell_escape "$launcher_path")" \
+            "$(shell_escape "$PROJECT_ROOT")" \
+            "$(shell_escape "$PROJECT_NAME")"
+        if [[ -n "$SERVICE_OVERRIDE" ]]; then
+            printf ' --service %s' "$(shell_escape "$SERVICE_OVERRIDE")"
+        fi
+        printf '\n'
+    } > "$DEV_SESSION_SHELL_LAUNCHER"
+    chmod 0755 "$DEV_SESSION_SHELL_LAUNCHER"
+}
+
+build_zellij_session_name() {
+    printf '%s\n' "$DISPLAY_NAME"
+}
+
+zellij_session_status() {
+    local session_name="$1"
+    local session_line
+    local listed_session_name
+
+    while IFS= read -r session_line; do
+        [[ "$session_line" == *" [Created "* ]] || continue
+        listed_session_name="${session_line%% [Created *}"
+        [[ "$listed_session_name" == "$session_name" ]] || continue
+
+        case "$session_line" in
+            *"(EXITED"*)
+                printf 'EXITED\n'
+                return 0
+                ;;
+            *"(KILLED"*)
+                printf 'KILLED\n'
+                return 0
+                ;;
+            *)
+                printf 'ACTIVE\n'
+                return 0
+                ;;
+        esac
+    done < <(zellij list-sessions --no-formatting 2>/dev/null || true)
+
+    printf 'MISSING\n'
+}
+
+open_zellij_session() {
+    local session_kind="$1"
+    local session_name="$2"
+    local session_layout="$3"
+    local session_status
+
+    session_status="$(zellij_session_status "$session_name")"
+
+    case "$session_status" in
+        ACTIVE)
+            print_step "Attaching zellij $session_kind session '$session_name'"
+            SHELL="$DEV_SESSION_SHELL_LAUNCHER" zellij attach "$session_name"
+            ;;
+        EXITED|KILLED)
+            print_step "Removing stale zellij session '$session_name' ($session_status)"
+            zellij kill-session "$session_name" >/dev/null 2>&1 || true
+            zellij delete-session --force "$session_name" >/dev/null 2>&1 || true
+            print_step "Starting zellij $session_kind session '$session_name'"
+            SHELL="$DEV_SESSION_SHELL_LAUNCHER" zellij --session "$session_name" --new-session-with-layout "$session_layout"
+            ;;
+        *)
+            print_step "Starting zellij $session_kind session '$session_name'"
+            SHELL="$DEV_SESSION_SHELL_LAUNCHER" zellij --session "$session_name" --new-session-with-layout "$session_layout"
+            ;;
+    esac
+}
+
 write_dev_session_layout() {
     local launcher_path="$1"
     local shell_args=()
-    local micro_args=()
+    local editor_args=()
     local ai_args=()
     local launcher_arg
 
@@ -990,9 +1073,9 @@ write_dev_session_layout() {
         "$PROJECT_NAME"
     )
 
-    micro_args=(
+    editor_args=(
         "tool"
-        "micro"
+        "editor"
         "--workspace"
         "$PROJECT_ROOT"
         "--project-name"
@@ -1010,7 +1093,7 @@ write_dev_session_layout() {
 
     if [[ -n "$SERVICE_OVERRIDE" ]]; then
         shell_args+=("--service" "$SERVICE_OVERRIDE")
-        micro_args+=("--service" "$SERVICE_OVERRIDE")
+        editor_args+=("--service" "$SERVICE_OVERRIDE")
         ai_args+=("--service" "$SERVICE_OVERRIDE")
     fi
 
@@ -1026,9 +1109,9 @@ write_dev_session_layout() {
         printf '        }\n'
         printf '    }\n'
         printf '    tab name="dev" cwd="%s" split_direction="vertical" hide_floating_panes=true {\n' "$(kdl_escape "$PROJECT_ROOT")"
-        printf '        pane size="68%%" name="micro" focus=true command="%s" {\n' "$(kdl_escape "$launcher_path")"
+        printf '        pane size="68%%" name="editor" focus=true command="%s" {\n' "$(kdl_escape "$launcher_path")"
         printf '            args'
-        for launcher_arg in "${micro_args[@]}"; do
+        for launcher_arg in "${editor_args[@]}"; do
             printf ' "%s"' "$(kdl_escape "$launcher_arg")"
         done
         printf '\n'
@@ -1519,6 +1602,16 @@ container_lazygit_install_script() {
         "$(script_asset_content "scripts/install/lazygit.sh")"
 }
 
+container_copilot_link_script() {
+    local container_home
+    container_home="$(container_home_dir)"
+    printf 'set -eu\ncopilot_bin=%s\nif [ ! -x "$copilot_bin" ]; then\n    copilot_bin=%s\nfi\nif [ ! -x "$copilot_bin" ]; then\n    echo "devenv: copilot installer completed but no copilot binary was found under %s or %s" >&2\n    exit 1\nfi\ninstall -d /usr/local/bin\nln -sf "$copilot_bin" /usr/local/bin/copilot\n' \
+        "$(shell_escape "$container_home/.local/bin/copilot")" \
+        "$(shell_escape "$container_home/bin/copilot")" \
+        "$container_home/.local/bin/copilot" \
+        "$container_home/bin/copilot"
+}
+
 command_container_tool_install() {
     local container_id
     local -a package_tools=()
@@ -1558,7 +1651,9 @@ $(script_asset_content "scripts/install/fresh.sh")"
                     printf '%s\n' "$(container_lazygit_install_script)"
                     ;;
                 copilot)
-                    printf '%s\n' 'curl -fsSL https://gh.io/copilot-install | bash'
+                    printf '%s\n%s\n' \
+                        'curl -fsSL https://gh.io/copilot-install | bash' \
+                        "$(container_copilot_link_script)"
                     ;;
             esac
         done
@@ -1601,6 +1696,7 @@ $(script_asset_content "scripts/install/fresh.sh")"
                 ;;
             copilot)
                 run_container_shell_script "$container_id" 'curl -fsSL https://gh.io/copilot-install | bash'
+                run_container_shell_script_as_root "$container_id" "$(container_copilot_link_script)"
                 ;;
         esac
     done
@@ -2252,6 +2348,7 @@ tool_help() {
     printf '%s\n' '  helix  Launch Helix (`hx`) in the workspace.'
     printf '%s\n' '  micro  Launch Micro in the workspace.'
     printf '%s\n' '  fresh  Launch Fresh in the workspace.'
+    printf '%s\n' '  editor Launch Fresh when installed, otherwise fall back to Micro.'
     printf '%s\n' '  tmux   Create or attach to a tmux session named `devenv`.'
     printf '%s\n' '  files  Launch a terminal file browser, or fall back to a directory listing.'
     printf '%s\n' '  tree   Launch a compact project tree view.'
@@ -2265,6 +2362,8 @@ tool_help() {
     printf '%s\n' '  devenv tool micro -- src/index.js'
     printf '%s\n' '  devenv tool fresh'
     printf '%s\n' '  devenv tool fresh -- src/index.js'
+    printf '%s\n' '  devenv tool editor'
+    printf '%s\n' '  devenv tool editor -- src/index.js'
     printf '%s\n' '  devenv tool tmux'
     printf '%s\n' '  devenv tool files'
     printf '%s\n' '  devenv tool tree'
@@ -2280,7 +2379,7 @@ command_tool() {
     local tool_script_path=""
     local exit_code=0
 
-    [[ -n "$TOOL_NAME" ]] || die "No tool provided. Use: devenv tool <helix|micro|fresh|tmux|files|tree|git|ai> [-- args...]"
+    [[ -n "$TOOL_NAME" ]] || die "No tool provided. Use: devenv tool <helix|micro|fresh|editor|tmux|files|tree|git|ai> [-- args...]"
 
     case "$TOOL_NAME" in
         helix)
@@ -2291,6 +2390,9 @@ command_tool() {
             ;;
         fresh)
             tool_script_path="scripts/tool/fresh.sh"
+            ;;
+        editor)
+            tool_script_path="scripts/tool/editor.sh"
             ;;
         tmux)
             tool_script_path="scripts/tool/tmux.sh"
@@ -2312,7 +2414,7 @@ command_tool() {
             return 0
             ;;
         *)
-                die "Unknown tool '$TOOL_NAME'. Use: devenv tool <helix|micro|fresh|tmux|files|tree|git|ai>"
+                die "Unknown tool '$TOOL_NAME'. Use: devenv tool <helix|micro|fresh|editor|tmux|files|tree|git|ai>"
             ;;
     esac
 
@@ -2358,16 +2460,18 @@ command_host_tmux() {
 
 command_dev() {
     local launcher_path
+    local session_name
     local exit_code=0
 
     require_command zellij "Install zellij on the host to use dev sessions."
 
     launcher_path="$(self_path)"
+    session_name="$(build_zellij_session_name)"
     ensure_running >/dev/null
     write_dev_session_layout "$launcher_path"
+    write_dev_session_shell_launcher "$launcher_path"
 
-    print_step "Starting zellij dev session for '$PROJECT_NAME'"
-    zellij --layout "$DEV_SESSION_LAYOUT" || exit_code=$?
+    open_zellij_session "dev" "$session_name" "$DEV_SESSION_LAYOUT" || exit_code=$?
 
     if [[ $REMOVE_ON_EXIT -eq 1 ]]; then
         stop_stack
@@ -2378,16 +2482,18 @@ command_dev() {
 
 command_vibe() {
     local launcher_path
+    local session_name
     local exit_code=0
 
     require_command zellij "Install zellij on the host to use vibe sessions."
 
     launcher_path="$(self_path)"
+    session_name="$(build_zellij_session_name)"
     ensure_running >/dev/null
     write_vibe_session_layout "$launcher_path"
+    write_dev_session_shell_launcher "$launcher_path"
 
-    print_step "Starting zellij vibe session for '$PROJECT_NAME'"
-    zellij --layout "$DEV_SESSION_LAYOUT" || exit_code=$?
+    open_zellij_session "vibe" "$session_name" "$DEV_SESSION_LAYOUT" || exit_code=$?
 
     if [[ $REMOVE_ON_EXIT -eq 1 ]]; then
         stop_stack
