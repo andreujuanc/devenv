@@ -117,6 +117,7 @@ Usage:
     devenv open [project_name] [--workspace PATH] [--rm] [--no-cache]
     devenv up [--workspace PATH] [--project-name NAME] [--no-cache]
     devenv down [--workspace PATH] [--project-name NAME]
+    devenv status [--workspace PATH] [--project-name NAME] [--service NAME]
     devenv shell [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache]
     devenv exec [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] -- <command> [args...]
     devenv tool <helix|micro|fresh|editor|tmux|files|tree|git|ai> [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [-- args...]
@@ -146,6 +147,7 @@ Commands:
     host-tmux  Create or attach to a host tmux session for the current repo.
     logs       Show compose logs for the repo environment.
     ps         Show compose service status for the repo environment.
+    status     Run a non-mutating environment health check.
     config     Print discovered repo and devcontainer settings.
     check      Validate host prerequisites and the repo contract.
     install    Install devenv into a directory on your PATH.
@@ -1802,6 +1804,24 @@ service_container_id() {
     docker ps -aq --filter "name=^/${CONTAINER_NAME}$" 2>/dev/null | tail -n 1
 }
 
+compose_service_container_id() {
+    local service_name="$1"
+    compose ps -q "$service_name" 2>/dev/null | tail -n 1
+}
+
+compose_expected_services() {
+    if [[ ${#RUN_SERVICES[@]} -gt 0 ]]; then
+        printf '%s\n' "${RUN_SERVICES[@]}"
+        return
+    fi
+
+    compose config --services
+}
+
+compose_project_services() {
+    compose ps --services 2>/dev/null || true
+}
+
 container_is_running() {
     local container_id="$1"
 
@@ -1811,6 +1831,28 @@ container_is_running() {
     fi
 
     docker inspect -f '{{if .State.Running}}true{{else}}false{{end}}' "$container_id" 2>/dev/null || printf 'false\n'
+}
+
+container_state_status() {
+    local container_id="$1"
+
+    if [[ -z "$container_id" ]]; then
+        printf 'missing\n'
+        return
+    fi
+
+    docker inspect -f '{{.State.Status}}' "$container_id" 2>/dev/null || printf 'missing\n'
+}
+
+container_health_status() {
+    local container_id="$1"
+
+    if [[ -z "$container_id" ]]; then
+        printf 'missing\n'
+        return
+    fi
+
+    docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id" 2>/dev/null || printf 'unknown\n'
 }
 
 ensure_service_container() {
@@ -2141,6 +2183,30 @@ wait_for_exec_ready() {
     done
 
     die "Service '$SERVICE_NAME' did not become ready for commands in time"
+}
+
+container_exec_ready() {
+    local container_id="$1"
+    local attempt
+    local max_attempts=5
+    local -a exec_args=()
+
+    [[ -n "$container_id" ]] || return 1
+    mapfile -d '' -t exec_args < <(docker_exec_base non-interactive "$container_id")
+
+    for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+        if "${exec_args[@]}" sh -lc 'exit 0' >/dev/null 2>&1; then
+            return 0
+        fi
+
+        if [[ "$(container_is_running "$container_id")" != "true" ]]; then
+            return 1
+        fi
+
+        sleep 0.2
+    done
+
+    return 1
 }
 
 start_stack() {
@@ -2522,6 +2588,103 @@ command_ps() {
     fi
 }
 
+command_status() {
+    local overall_status="healthy"
+    local primary_label="$SERVICE_NAME"
+    local label container_id state health ready
+    local candidate existing found
+    local -a expected_targets=()
+    local -a observed_targets=()
+    local -a targets=()
+    local -a details=()
+
+    if [[ "$SCENARIO" == "compose" ]]; then
+        mapfile -t expected_targets < <(compose_expected_services)
+        mapfile -t observed_targets < <(compose_project_services)
+        for candidate in "${expected_targets[@]}" "${observed_targets[@]}"; do
+            [[ -n "$candidate" ]] || continue
+            found=0
+            for existing in "${targets[@]}"; do
+                if [[ "$existing" == "$candidate" ]]; then
+                    found=1
+                    break
+                fi
+            done
+            if [[ $found -eq 0 ]]; then
+                targets+=("$candidate")
+            fi
+        done
+    else
+        targets=("$CONTAINER_NAME")
+        primary_label="$CONTAINER_NAME"
+    fi
+
+    if [[ ${#targets[@]} -eq 0 ]]; then
+        die "Could not determine which containers belong to this environment"
+    fi
+
+    printf 'Scenario: %s\n' "$SCENARIO"
+    printf 'Project: %s\n' "$PROJECT_NAME"
+    printf 'Primary: %s\n' "$primary_label"
+    printf 'Checks:\n'
+
+    for label in "${targets[@]}"; do
+        if [[ "$SCENARIO" == "compose" ]]; then
+            container_id="$(compose_service_container_id "$label")"
+        else
+            container_id="$(service_container_id)"
+        fi
+
+        state="$(container_state_status "$container_id")"
+        health="$(container_health_status "$container_id")"
+        details=()
+
+        if [[ -z "$container_id" ]]; then
+            overall_status="unhealthy"
+            details+=("missing")
+        else
+            details+=("state=$state")
+
+            if [[ "$state" != "running" ]]; then
+                overall_status="unhealthy"
+            fi
+
+            if [[ "$health" != "none" ]]; then
+                details+=("health=$health")
+                if [[ "$health" != "healthy" ]]; then
+                    overall_status="unhealthy"
+                fi
+            fi
+
+            if [[ "$label" == "$SERVICE_NAME" || "$label" == "$CONTAINER_NAME" ]]; then
+                if [[ "$state" == "running" ]]; then
+                    if container_exec_ready "$container_id"; then
+                        ready="ready"
+                    else
+                        ready="not-ready"
+                        overall_status="unhealthy"
+                    fi
+                else
+                    ready="not-ready"
+                fi
+                details+=("$ready")
+            fi
+        fi
+
+        printf '  - %s: %s\n' "$label" "$(IFS=', '; printf '%s' "${details[*]}")"
+    done
+
+    printf 'Status: %s\n' "$overall_status"
+
+    if [[ "$overall_status" == "healthy" ]]; then
+        print_success "Environment is healthy"
+        return 0
+    fi
+
+    print_error "Environment is unhealthy"
+    return 1
+}
+
 command_config() {
     cat <<EOF
 Workspace root:   $PROJECT_ROOT
@@ -2570,7 +2733,7 @@ parse_args() {
 
     if [[ $# -gt 0 ]]; then
         case "$1" in
-            dev|vibe|ide|open|up|down|shell|exec|tool|host-tool|container-tool|host-tmux|logs|ps|config|check|install|uninstall|help)
+            dev|vibe|ide|open|up|down|status|shell|exec|tool|host-tool|container-tool|host-tmux|logs|ps|config|check|install|uninstall|help)
                 COMMAND="$1"
                 explicit_command=1
                 shift
@@ -2738,7 +2901,7 @@ main() {
         check)
             command_check
             ;;
-        dev|vibe|up|down|shell|exec|tool|container-tool|host-tmux|logs|ps|open)
+        dev|vibe|up|down|status|shell|exec|tool|container-tool|host-tmux|logs|ps|open)
             require_runtime_prereqs
             emit_spec_warnings
             case "$COMMAND" in
@@ -2756,6 +2919,9 @@ main() {
                     ;;
                 down)
                     command_down
+                    ;;
+                status)
+                    command_status
                     ;;
                 shell)
                     command_shell

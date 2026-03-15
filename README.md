@@ -79,6 +79,12 @@ Run a command in the container:
 devenv exec -- npm run dev
 ```
 
+Check whether the environment is healthy without starting it:
+
+```bash
+devenv status
+```
+
 Run a one-off command and remove the environment afterward:
 
 ```bash
@@ -101,6 +107,7 @@ devenv ide [--workspace PATH] [--project-name NAME] [--service NAME] [--rm] [--n
 devenv open [project_name] [--workspace PATH] [--rm] [--no-cache]
 devenv up [--workspace PATH] [--project-name NAME] [--no-cache]
 devenv down [--workspace PATH] [--project-name NAME]
+devenv status [--workspace PATH] [--project-name NAME] [--service NAME]
 devenv shell [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache]
 devenv exec [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] -- <command> [args...]
 devenv tool <helix|micro|fresh|editor|tmux|files|tree|git|ai> [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [-- args...]
@@ -128,6 +135,7 @@ devenv uninstall [--prefix PATH]
 - `devenv vibe --rm` tears the stack down after the Zellij session exits.
 - `devenv shell` attaches to the configured service without tearing the stack down by default.
 - `devenv exec -- <cmd>` starts the environment if needed, waits until the target container is ready, and then runs the command inside it.
+- `devenv status` does not start the environment; it fails when no supported devcontainer config exists and returns non-zero if managed containers are missing, stopped, not command-ready, or Docker reports them unhealthy.
 - `forwardPorts` is published on the host as `127.0.0.1:<port>` for the primary service/container.
 - `devenv host-tmux` creates or attaches to a host tmux session named after the repo and starts a `devenv shell` in its first window.
 - `devenv tool ...` is optional and only works when the repo image already provides that tool.
