@@ -2190,7 +2190,7 @@ wait_for_exec_ready() {
     mapfile -d '' -t exec_args < <(docker_exec_base non-interactive "$container_id")
 
     for ((attempt = 1; attempt <= max_attempts; attempt++)); do
-        if "${exec_args[@]}" sh -lc 'exit 0' >/dev/null 2>&1; then
+        if "${exec_args[@]}" sh -lc 'exit 0' </dev/null >/dev/null 2>&1; then
             return
         fi
 
@@ -2214,7 +2214,7 @@ container_exec_ready() {
     mapfile -d '' -t exec_args < <(docker_exec_base non-interactive "$container_id")
 
     for ((attempt = 1; attempt <= max_attempts; attempt++)); do
-        if "${exec_args[@]}" sh -lc 'exit 0' >/dev/null 2>&1; then
+        if "${exec_args[@]}" sh -lc 'exit 0' </dev/null >/dev/null 2>&1; then
             return 0
         fi
 
