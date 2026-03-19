@@ -177,7 +177,7 @@ The Zellij session title uses the devcontainer `name` field as-is.
 The generated dev layout now keeps the working panes inside the container:
 
 - main pane: container-scoped `devenv tool editor`, preferring `fresh` and falling back to `micro`
-- right pane: container-scoped AI CLI via `devenv tool ai`, preferring `copilot`, then `gemini`, then `gemini-cli`
+- right pane: container-scoped AI CLI via `devenv tool ai`, preferring `copilot`, then `opencode`, then `gemini`, then `gemini-cli`
 - hidden floating shell pane: container shell via `devenv shell`, positioned near the bottom and toggled with `Alt-f`
 - additional Zellij panes opened during the session inherit a container shell instead of a host shell
 
@@ -191,10 +191,10 @@ devenv host-tool check zellij
 Recommended container tools for the dev layout:
 
 ```bash
-devenv container-tool install fresh copilot
+devenv container-tool install fresh copilot opencode
 ```
 
-`copilot` can be installed by `devenv`. The container install links the resulting binary into `/usr/local/bin`, so plain shells inside the container can find it on `PATH`. Gemini is detected if your image already provides it.
+`copilot` and `opencode` can be installed by `devenv`. The container install links the resulting binary into `/usr/local/bin`, so plain shells inside the container can find it on `PATH`. Gemini is detected if your image already provides it.
 
 If you want to tear the environment down when you leave the Zellij session:
 
@@ -215,7 +215,7 @@ The Zellij session title uses the devcontainer `name` field as-is.
 The generated vibe layout keeps all working panes inside the container:
 
 - left pane: container-scoped git UI via `devenv tool git`, preferring `lazygit`, then `gitui`, then `git status`
-- right pane: container-scoped AI CLI via `devenv tool ai`, preferring `copilot`, then `gemini`, then `gemini-cli`
+- right pane: container-scoped AI CLI via `devenv tool ai`, preferring `copilot`, then `opencode`, then `gemini`, then `gemini-cli`
 - hidden floating shell pane: container shell via `devenv shell`, positioned near the bottom and toggled with Zellij's floating-pane shortcut
 - additional Zellij panes opened during the session inherit a container shell instead of a host shell
 
@@ -224,10 +224,10 @@ By default, the shell starts hidden in `vibe`. Toggle it with `Alt-f`, which map
 Recommended container tools for the vibe layout:
 
 ```bash
-devenv container-tool install lazygit copilot
+devenv container-tool install lazygit copilot opencode
 ```
 
-`copilot` can be installed by `devenv`. The container install links the resulting binary into `/usr/local/bin`, so plain shells inside the container can find it on `PATH`. Gemini is detected if your image already provides it.
+`copilot` and `opencode` can be installed by `devenv`. The container install links the resulting binary into `/usr/local/bin`, so plain shells inside the container can find it on `PATH`. Gemini is detected if your image already provides it.
 
 If you want to tear the environment down when you leave the Zellij session:
 
@@ -303,7 +303,7 @@ sudo dnf install -y lazygit
 
 ### Container Tools
 
-Use `container-tool` for mutable extras installed inside the active service container.
+Use `container-tool` for mutable extras installed inside the active service container, including optional AI CLIs such as `copilot` and `opencode`.
 
 List supported container tools:
 
@@ -314,16 +314,16 @@ devenv container-tool list
 Preview install commands without running them:
 
 ```bash
-devenv container-tool install --print jq helix micro fresh git yazi copilot
+devenv container-tool install --print jq helix micro fresh git yazi copilot opencode
 ```
 
 Install tools in the current container:
 
 ```bash
-devenv container-tool install jq helix micro fresh git yazi copilot
+devenv container-tool install jq helix micro fresh git yazi copilot opencode
 ```
 
-Container-side installs are convenient, but they are not the source of truth. If the tooling matters for the repo, move it into the repo image later. `copilot` is still installed via the upstream bootstrap, then linked into `/usr/local/bin` so regular container shells can resolve it without extra PATH setup.
+Container-side installs are convenient, but they are not the source of truth. If the tooling matters for the repo, move it into the repo image later. `copilot` and `opencode` are installed via their upstream bootstraps, then linked into `/usr/local/bin` so regular container shells can resolve them without extra PATH setup.
 
 For package-manager based installs, `devenv` runs the install step as `root` with `docker exec -u root`, so the container does not need `sudo` for these mutable installs.
 
@@ -340,7 +340,7 @@ If `SSH_AUTH_SOCK` exists on the host, `devenv` now forwards it automatically fo
 
 If you do not want that behavior for a session, run `devenv` with `DEVENV_NO_SSH_AGENT_FORWARDING=1`.
 
-If `~/.copilot` or `~/.gemini` exist on the host, `devenv` also mounts them automatically into the container user's home directory as `~/.copilot` and `~/.gemini`, unless the repo already defines its own mount for those paths.
+If `~/.copilot`, `~/.gemini`, `~/.opencode`, or `~/.local/share/opencode` exist on the host, `devenv` also mounts them automatically into the container user's home directory at the matching paths, unless the repo already defines its own mount for those paths.
 
 If you do not want that behavior for a session, run `devenv` with `DEVENV_NO_HOST_DOTDIR_FORWARDING=1`.
 

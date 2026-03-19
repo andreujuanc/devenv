@@ -142,8 +142,8 @@ Commands:
     shell      Open a shell in the configured service without tearing the stack down on exit.
     exec       Run a command inside the configured service.
     tool       Launch an optional built-in terminal tool inside the configured service.
-    host-tool  Manage host-side helper tools such as jq, tmux, helix, lapce, and copilot.
-    container-tool Manage container-side helper tools such as jq, tmux, helix, and copilot.
+    host-tool  Manage host-side helper tools such as jq, tmux, helix, and zellij.
+    container-tool Manage container-side helper tools such as jq, helix, git, and AI CLIs.
     host-tmux  Create or attach to a host tmux session for the current repo.
     logs       Show compose logs for the repo environment.
     ps         Show compose service status for the repo environment.
@@ -196,13 +196,14 @@ container_tool_help() {
         cat <<'EOF'
 Usage:
     devenv container-tool list
-    devenv container-tool check [jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot ...]
-    devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot ...> [--print]
+    devenv container-tool check [jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|opencode ...]
+    devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|opencode ...> [--print]
 
 Notes:
     - Container installs are mutable and can disappear when the container is recreated.
     - Move persistent tooling into the repo image once you know you want it.
     - `copilot` uses: curl -fsSL https://gh.io/copilot-install | bash
+    - `opencode` uses: curl -fsSL https://opencode.ai/install | bash
 EOF
 }
 
@@ -281,10 +282,10 @@ devcontainer_has_explicit_ssh_agent_config() {
 }
 
 devcontainer_has_explicit_host_dir_config() {
-    local dir_name="$1"
+    local path_fragment="$1"
     ensure_devcontainer_cache
-    jq -e --arg dir_name "$dir_name" '
-        (((.mounts // []) | map(tostring | test($dir_name; "i")) | any) // false)
+    jq -e --arg path_fragment "${path_fragment,,}" '
+        (((.mounts // []) | map(tostring | ascii_downcase | contains($path_fragment)) | any) // false)
     ' "$DEVCONTAINER_CACHE" >/dev/null 2>&1
 }
 
@@ -616,7 +617,7 @@ configure_automatic_ssh_agent_forwarding() {
 }
 
     configure_automatic_host_dir_mounts() {
-        local container_home host_dir target_dir
+        local container_home host_dir rel_path target_dir
 
         AUTO_HOST_DOTDIR_MOUNTING=0
         AUTO_HOST_MOUNT_SOURCES=()
@@ -628,15 +629,15 @@ configure_automatic_ssh_agent_forwarding() {
 
         container_home="$(container_home_dir)"
 
-        for dir_name in .copilot .gemini; do
-            host_dir="$HOME/$dir_name"
-            target_dir="$container_home/$dir_name"
+        for rel_path in .copilot .gemini .opencode .local/share/opencode; do
+            host_dir="$HOME/$rel_path"
+            target_dir="$container_home/$rel_path"
 
             if [[ ! -d "$host_dir" ]]; then
                 continue
             fi
 
-            if devcontainer_has_explicit_host_dir_config "$dir_name"; then
+            if devcontainer_has_explicit_host_dir_config "$rel_path"; then
                 continue
             fi
 
@@ -1277,6 +1278,9 @@ normalize_helper_tool() {
         copilot|copilot-cli|github-copilot-cli)
             printf 'copilot\n'
             ;;
+        opencode)
+            printf 'opencode\n'
+            ;;
         *)
             printf '%s\n' "$1"
             ;;
@@ -1294,7 +1298,7 @@ host_tool_supported() {
 
 container_tool_supported() {
     case "$1" in
-        jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot)
+        jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|opencode)
             return 0
             ;;
     esac
@@ -1326,6 +1330,7 @@ container_tool_list() {
     printf 'tree\n'
     printf 'lazygit\n'
     printf 'copilot\n'
+    printf 'opencode\n'
 }
 
 require_tool_args() {
@@ -1532,6 +1537,9 @@ container_has_tool_script() {
         copilot)
             printf 'command -v copilot >/dev/null 2>&1\n'
             ;;
+        opencode)
+            printf 'command -v opencode >/dev/null 2>&1\n'
+            ;;
         *)
             return 1
             ;;
@@ -1604,14 +1612,16 @@ container_lazygit_install_script() {
         "$(script_asset_content "scripts/install/lazygit.sh")"
 }
 
-container_copilot_link_script() {
+container_link_user_bin_script() {
+    local tool_name="$1"
     local container_home
     container_home="$(container_home_dir)"
-    printf 'set -eu\ncopilot_bin=%s\nif [ ! -x "$copilot_bin" ]; then\n    copilot_bin=%s\nfi\nif [ ! -x "$copilot_bin" ]; then\n    echo "devenv: copilot installer completed but no copilot binary was found under %s or %s" >&2\n    exit 1\nfi\ninstall -d /usr/local/bin\nln -sf "$copilot_bin" /usr/local/bin/copilot\n' \
-        "$(shell_escape "$container_home/.local/bin/copilot")" \
-        "$(shell_escape "$container_home/bin/copilot")" \
-        "$container_home/.local/bin/copilot" \
-        "$container_home/bin/copilot"
+    printf 'set -eu\ntool_name=%s\ntool_bin=%s\nif [ ! -x "$tool_bin" ]; then\n    tool_bin=%s\nfi\nif [ ! -x "$tool_bin" ]; then\n    echo "devenv: ${tool_name} installer completed but no ${tool_name} binary was found under %s or %s" >&2\n    exit 1\nfi\ninstall -d /usr/local/bin\nln -sf "$tool_bin" "/usr/local/bin/${tool_name}"\n' \
+        "$(shell_escape "$tool_name")" \
+        "$(shell_escape "$container_home/.local/bin/$tool_name")" \
+        "$(shell_escape "$container_home/bin/$tool_name")" \
+        "$container_home/.local/bin/$tool_name" \
+        "$container_home/bin/$tool_name"
 }
 
 command_container_tool_install() {
@@ -1621,7 +1631,7 @@ command_container_tool_install() {
     local tool
     local script
 
-    require_tool_args "No container tools provided. Use: devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot ...>"
+    require_tool_args "No container tools provided. Use: devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|opencode ...>"
     validate_tool_args container
 
     if [[ $PRINT_ONLY -eq 1 ]]; then
@@ -1655,7 +1665,12 @@ $(script_asset_content "scripts/install/fresh.sh")"
                 copilot)
                     printf '%s\n%s\n' \
                         'curl -fsSL https://gh.io/copilot-install | bash' \
-                        "$(container_copilot_link_script)"
+                        "$(container_link_user_bin_script "copilot")"
+                    ;;
+                opencode)
+                    printf '%s\n%s\n' \
+                        'curl -fsSL https://opencode.ai/install | bash' \
+                        "$(container_link_user_bin_script "opencode")"
                     ;;
             esac
         done
@@ -1698,7 +1713,11 @@ $(script_asset_content "scripts/install/fresh.sh")"
                 ;;
             copilot)
                 run_container_shell_script "$container_id" 'curl -fsSL https://gh.io/copilot-install | bash'
-                run_container_shell_script_as_root "$container_id" "$(container_copilot_link_script)"
+                run_container_shell_script_as_root "$container_id" "$(container_link_user_bin_script "copilot")"
+                ;;
+            opencode)
+                run_container_shell_script "$container_id" 'curl -fsSL https://opencode.ai/install | bash'
+                run_container_shell_script_as_root "$container_id" "$(container_link_user_bin_script "opencode")"
                 ;;
         esac
     done
