@@ -1,1 +1,1 @@
-FROM node:22
+FROM ubuntu

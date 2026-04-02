@@ -4,6 +4,6 @@
     // TESTING
 	"dockerComposeFile": "docker-compose.yml",
 	"workspaceFolder": "/workspace",
-	"remoteUser": "node",
+	"remoteUser": "ubuntu",
 	"forwardPorts": [8080]
 }

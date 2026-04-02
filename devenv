@@ -28,6 +28,7 @@ REMOVE_ON_EXIT=0
 INSTALL_PREFIX="$DEFAULT_INSTALL_PREFIX"
 FORCE_INSTALL=0
 NO_CACHE_BUILD=0
+USE_BUILDKIT="${DEVENV_USE_BUILDKIT:-0}"
 DISPLAY_NAME=""
 SCENARIO=""
 SERVICE_NAME=""
@@ -111,16 +112,16 @@ usage() {
         cat <<'EOF'
 Usage:
     devenv
-    devenv dev [--workspace PATH] [--project-name NAME] [--service NAME] [--rm] [--no-cache]
-    devenv vibe [--workspace PATH] [--project-name NAME] [--service NAME] [--rm] [--no-cache]
-    devenv ide [--workspace PATH] [--project-name NAME] [--service NAME] [--rm] [--no-cache]
-    devenv open [project_name] [--workspace PATH] [--rm] [--no-cache]
-    devenv up [--workspace PATH] [--project-name NAME] [--no-cache]
+    devenv dev [--workspace PATH] [--project-name NAME] [--service NAME] [--rm] [--no-cache] [--use-buildkit]
+    devenv vibe [--workspace PATH] [--project-name NAME] [--service NAME] [--rm] [--no-cache] [--use-buildkit]
+    devenv ide [--workspace PATH] [--project-name NAME] [--service NAME] [--rm] [--no-cache] [--use-buildkit]
+    devenv open [project_name] [--workspace PATH] [--rm] [--no-cache] [--use-buildkit]
+    devenv up [--workspace PATH] [--project-name NAME] [--no-cache] [--use-buildkit]
     devenv down [--workspace PATH] [--project-name NAME]
     devenv status [--workspace PATH] [--project-name NAME] [--service NAME]
-    devenv shell [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache]
-    devenv exec [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] -- <command> [args...]
-    devenv tool <helix|micro|fresh|editor|tmux|files|tree|git|ai> [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [-- args...]
+    devenv shell [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [--use-buildkit]
+    devenv exec [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [--use-buildkit] -- <command> [args...]
+    devenv tool <helix|micro|fresh|editor|tmux|files|tree|git|ai> [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [--use-buildkit] [-- args...]
     devenv host-tool <list|check|install> [tool...] [--print]
     devenv container-tool <list|check|install> [tool...] [--print]
     devenv host-tmux [--workspace PATH] [--project-name NAME] [--service NAME]
@@ -128,6 +129,8 @@ Usage:
     devenv ps [--workspace PATH] [--project-name NAME]
     devenv config [--workspace PATH] [--project-name NAME]
     devenv check [--workspace PATH]
+    devenv list [-a]
+    devenv stop <name> | --all
     devenv install [--prefix PATH] [--force]
     devenv uninstall [--prefix PATH]
     devenv help
@@ -150,6 +153,8 @@ Commands:
     status     Run a non-mutating environment health check.
     config     Print discovered repo and devcontainer settings.
     check      Validate host prerequisites and the repo contract.
+    list       List running dev environments. Use -a to include stopped ones.
+    stop       Stop a dev environment by name, or all with --all.
     install    Install devenv into a directory on your PATH.
     uninstall  Remove an installed devenv from a directory on your PATH.
     help       Show this message.
@@ -161,6 +166,7 @@ Options:
     --prefix            Install or uninstall target directory. Defaults to ~/.local/bin.
     --force             Replace an existing installed file.
     --no-cache          Rebuild images from scratch without using Docker build cache.
+    --use-buildkit      Enable Docker BuildKit for image builds (disabled by default for compatibility).
     --rm                Stop services when the shell from `open` exits.
     --print             Print install commands instead of running them.
     --help, -h          Show this message.
@@ -300,6 +306,51 @@ container_home_dir() {
     fi
 
     printf '/home/%s\n' "$REMOTE_USER"
+}
+
+# Query the actual home directory for $REMOTE_USER from a running container.
+# Falls back to container_home_dir() if the container query fails.
+container_home_dir_actual() {
+    local container_id="$1"
+    local home_dir
+
+    if [[ -z "$REMOTE_USER" || "$REMOTE_USER" == "root" ]]; then
+        printf '/root\n'
+        return
+    fi
+
+    home_dir="$(docker exec -i -u root "$container_id" sh -c \
+        'getent passwd "$1" 2>/dev/null | cut -d: -f6' -- "$REMOTE_USER" 2>/dev/null)"
+
+    if [[ -n "$home_dir" ]]; then
+        printf '%s\n' "$home_dir"
+    else
+        container_home_dir
+    fi
+}
+
+# After bind-mounting host directories into the container the mount-point
+# parent directories may be created by Docker as root.  Ensure the
+# remote user owns their home tree up to and including ~/.local so that
+# tools like opencode can create XDG state/cache directories without
+# hitting EACCES.
+fix_host_mount_ownership() {
+    local container_id="$1"
+    local home_dir
+
+    [[ -n "$REMOTE_USER" && "$REMOTE_USER" != "root" ]] || return 0
+    [[ "$AUTO_HOST_DOTDIR_MOUNTING" -eq 1 ]] || return 0
+
+    home_dir="$(container_home_dir_actual "$container_id")"
+
+    # chown the home dir and the .local subtree so the user can create
+    # directories inside it (e.g. .local/state, .local/cache).
+    # Pass values as positional parameters to avoid injection via the sh -c string.
+    docker exec -i -u root "$container_id" sh -c \
+        'chown "$1" "$2" "$2"/.local 2>/dev/null || true
+         chown -R "$1" "$2"/.local 2>/dev/null || true' \
+        -- "$REMOTE_USER" "$home_dir" \
+        >/dev/null 2>&1 || true
 }
 
 mount_spec_value() {
@@ -1614,14 +1665,32 @@ container_lazygit_install_script() {
 
 container_link_user_bin_script() {
     local tool_name="$1"
-    local container_home
-    container_home="$(container_home_dir)"
-    printf 'set -eu\ntool_name=%s\ntool_bin=%s\nif [ ! -x "$tool_bin" ]; then\n    tool_bin=%s\nfi\nif [ ! -x "$tool_bin" ]; then\n    echo "devenv: ${tool_name} installer completed but no ${tool_name} binary was found under %s or %s" >&2\n    exit 1\nfi\ninstall -d /usr/local/bin\nln -sf "$tool_bin" "/usr/local/bin/${tool_name}"\n' \
+    # Resolve the actual home directory at script-run time so we handle
+    # images where the user's home is not /home/<username>.
+    printf 'set -eu
+tool_name=%s
+if [ -n "%s" ] && [ "%s" != "root" ]; then
+    user_home="$(getent passwd %s 2>/dev/null | cut -d: -f6)"
+    user_home="${user_home:-/home/%s}"
+else
+    user_home=/root
+fi
+tool_bin="${user_home}/.local/bin/${tool_name}"
+if [ ! -x "$tool_bin" ]; then
+    tool_bin="${user_home}/bin/${tool_name}"
+fi
+if [ ! -x "$tool_bin" ]; then
+    echo "devenv: ${tool_name} installer completed but no ${tool_name} binary was found under ${user_home}/.local/bin or ${user_home}/bin" >&2
+    exit 1
+fi
+install -d /usr/local/bin
+ln -sf "$tool_bin" "/usr/local/bin/${tool_name}"
+' \
         "$(shell_escape "$tool_name")" \
-        "$(shell_escape "$container_home/.local/bin/$tool_name")" \
-        "$(shell_escape "$container_home/bin/$tool_name")" \
-        "$container_home/.local/bin/$tool_name" \
-        "$container_home/bin/$tool_name"
+        "$(shell_escape "${REMOTE_USER:-}")" \
+        "$(shell_escape "${REMOTE_USER:-}")" \
+        "$(shell_escape "${REMOTE_USER:-}")" \
+        "$(shell_escape "${REMOTE_USER:-}")"
 }
 
 command_container_tool_install() {
@@ -1810,6 +1879,7 @@ command_uninstall() {
 compose() {
     (
         cd "$PROJECT_ROOT"
+        export DOCKER_BUILDKIT="$USE_BUILDKIT"
         docker compose -p "$PROJECT_NAME" "${COMPOSE_ARGS[@]}" "$@"
     )
 }
@@ -2130,6 +2200,7 @@ PROJECT_ROOT=$PROJECT_ROOT
 PROJECT_NAME=$PROJECT_NAME
 SERVICE_NAME=$SERVICE_NAME
 CONTAINER_ID=$container_id
+SCENARIO=$SCENARIO
 EOF
 }
 
@@ -2265,6 +2336,7 @@ start_stack() {
             docker start "$previous_container_id" >/dev/null
         else
             print_step "Building image '$IMAGE_NAME'"
+            export DOCKER_BUILDKIT="$USE_BUILDKIT"
             if [[ $NO_CACHE_BUILD -eq 1 ]]; then
                 docker build --no-cache -t "$IMAGE_NAME" "${BUILD_ARGS[@]}" -f "$DOCKERFILE_PATH" "$BUILD_CONTEXT_PATH"
             else
@@ -2293,6 +2365,12 @@ start_stack() {
     current_container_id="$(ensure_service_container)"
     prune_creation_markers "$current_container_id"
     wait_for_exec_ready "$current_container_id"
+
+    # When host directories are bind-mounted into the container Docker may
+    # create parent directories (e.g. ~/.local) as root.  Fix ownership
+    # before any lifecycle commands run so the remote user can write there
+    # (e.g. opencode creating ~/.local/state).
+    fix_host_mount_ownership "$current_container_id"
 
     if [[ -z "$previous_container_id" || "$previous_container_id" != "$current_container_id" ]]; then
         run_creation_lifecycle "$current_container_id"
@@ -2599,6 +2677,189 @@ command_logs() {
     fi
 }
 
+devenv_state_base() {
+    printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/devenv"
+}
+
+enumerate_environments() {
+    local state_base callback="$1"
+    local env_project_root env_project_name env_service_name env_container_id env_scenario
+    local env_status env_state_dir
+
+    state_base="$(devenv_state_base)"
+    [[ -d "$state_base" ]] || return 0
+
+    shopt -s nullglob
+    for env_state_dir in "$state_base"/*/; do
+        local runtime_env="$env_state_dir/runtime.env"
+        [[ -f "$runtime_env" ]] || continue
+
+        env_project_root=""
+        env_project_name=""
+        env_service_name=""
+        env_container_id=""
+        env_scenario=""
+
+        # Source into local scope — these variables are intentionally local
+        while IFS='=' read -r key value; do
+            case "$key" in
+                PROJECT_ROOT)   env_project_root="$value" ;;
+                PROJECT_NAME)   env_project_name="$value" ;;
+                SERVICE_NAME)   env_service_name="$value" ;;
+                CONTAINER_ID)   env_container_id="$value" ;;
+                SCENARIO)       env_scenario="$value" ;;
+            esac
+        done < "$runtime_env"
+
+        [[ -n "$env_project_name" ]] || continue
+
+        # Determine container status
+        env_status="stale"
+        if [[ -n "$env_container_id" ]]; then
+            local docker_state
+            docker_state="$(docker inspect --format '{{.State.Status}}' "$env_container_id" 2>/dev/null || true)"
+            if [[ -n "$docker_state" ]]; then
+                env_status="$docker_state"
+            fi
+        fi
+
+        "$callback" "$env_project_name" "$env_scenario" "$env_status" "$env_project_root" "$env_container_id" "$env_state_dir"
+    done
+    shopt -u nullglob
+}
+
+command_list() {
+    local show_all="$LIST_ALL"
+    local found=0
+    local -a names=()
+    local -a scenarios=()
+    local -a statuses=()
+    local -a roots=()
+    local max_name=4 max_scenario=8 max_status=6  # header lengths
+
+    _list_collector() {
+        local name="$1" scenario="$2" status="$3" root="$4"
+
+        if [[ "$show_all" -eq 0 && "$status" != "running" ]]; then
+            return
+        fi
+
+        [[ -z "$scenario" ]] && scenario="unknown"
+        found=1
+        names+=("$name")
+        scenarios+=("$scenario")
+        statuses+=("$status")
+        roots+=("$root")
+
+        (( ${#name} > max_name )) && max_name=${#name} || true
+        (( ${#scenario} > max_scenario )) && max_scenario=${#scenario} || true
+        (( ${#status} > max_status )) && max_status=${#status} || true
+    }
+
+    enumerate_environments _list_collector
+
+    if [[ $found -eq 0 ]]; then
+        if [[ "$show_all" -eq 1 ]]; then
+            print_step "No dev environments found"
+        else
+            print_step "No running dev environments found (use -a to show all)"
+        fi
+        return 0
+    fi
+
+    local fmt="%-${max_name}s  %-${max_scenario}s  %-${max_status}s  %s\n"
+    printf "$fmt" "NAME" "SCENARIO" "STATUS" "PROJECT ROOT"
+    local i
+    for ((i = 0; i < ${#names[@]}; i++)); do
+        printf "$fmt" "${names[$i]}" "${scenarios[$i]}" "${statuses[$i]}" "${roots[$i]}"
+    done
+}
+
+stop_environment() {
+    local name="$1" scenario="$2" container_id="$3" state_dir="$4"
+    local runtime_env="$state_dir/runtime.env"
+
+    print_step "Stopping environment '$name'"
+
+    if [[ "$scenario" == "compose" ]]; then
+        if docker compose -p "$name" down --remove-orphans 2>/dev/null; then
+            rm -f "$runtime_env"
+            print_success "Environment '$name' stopped (compose)"
+            return 0
+        else
+            print_warning "Compose stop failed for '$name', trying container removal"
+        fi
+    elif [[ "$scenario" == "dockerfile" ]]; then
+        if [[ -n "$container_id" ]]; then
+            docker rm -f "$container_id" >/dev/null 2>&1 || true
+        fi
+        rm -f "$runtime_env"
+        print_success "Environment '$name' stopped (dockerfile)"
+        return 0
+    fi
+
+    # Legacy or fallback: scenario unknown — try compose first, then docker rm
+    if docker compose -p "$name" down --remove-orphans 2>/dev/null; then
+        rm -f "$runtime_env"
+        print_success "Environment '$name' stopped (compose, inferred)"
+        return 0
+    fi
+
+    if [[ -n "$container_id" ]]; then
+        if docker rm -f "$container_id" >/dev/null 2>&1; then
+            rm -f "$runtime_env"
+            print_success "Environment '$name' stopped (container removed)"
+            return 0
+        fi
+    fi
+
+    print_warning "Could not stop '$name' automatically. Try 'devenv down' from the project directory: $(cat "$runtime_env" 2>/dev/null | grep PROJECT_ROOT | cut -d= -f2-)"
+    return 1
+}
+
+command_stop() {
+    local target="$STOP_TARGET"
+    local stop_all="$STOP_ALL"
+    local found=0
+    local failures=0
+
+    if [[ -z "$target" && "$stop_all" -eq 0 ]]; then
+        die "Usage: devenv stop <name> | --all"
+    fi
+
+    _stop_collector() {
+        local name="$1" scenario="$2" status="$3" root="$4" container_id="$5" state_dir="$6"
+
+        if [[ "$status" != "running" ]]; then
+            return
+        fi
+
+        if [[ "$stop_all" -eq 1 ]]; then
+            found=1
+            stop_environment "$name" "$scenario" "$container_id" "$state_dir" || ((failures++))
+        elif [[ "$name" == "$target" ]]; then
+            found=1
+            stop_environment "$name" "$scenario" "$container_id" "$state_dir" || ((failures++))
+        fi
+    }
+
+    enumerate_environments _stop_collector
+
+    if [[ $found -eq 0 ]]; then
+        if [[ "$stop_all" -eq 1 ]]; then
+            print_step "No running environments to stop"
+        else
+            die "No running environment found with name '$target'"
+        fi
+        return 0
+    fi
+
+    if [[ $failures -gt 0 ]]; then
+        print_warning "$failures environment(s) could not be stopped automatically"
+        return 1
+    fi
+}
+
 command_ps() {
     if [[ "$SCENARIO" == "compose" ]]; then
         compose ps
@@ -2748,11 +3009,14 @@ parse_args() {
     SUBCOMMAND=""
     TOOL_ARGS=()
     PRINT_ONLY=0
+    STOP_TARGET=""
+    STOP_ALL=0
+    LIST_ALL=0
     local explicit_command=0
 
     if [[ $# -gt 0 ]]; then
         case "$1" in
-            dev|vibe|ide|open|up|down|status|shell|exec|tool|host-tool|container-tool|host-tmux|logs|ps|config|check|install|uninstall|help)
+            dev|vibe|ide|open|up|down|status|shell|exec|tool|host-tool|container-tool|host-tmux|logs|ps|config|check|list|stop|install|uninstall|help)
                 COMMAND="$1"
                 explicit_command=1
                 shift
@@ -2776,6 +3040,11 @@ parse_args() {
 
     if [[ ( "$COMMAND" == "host-tool" || "$COMMAND" == "container-tool" ) && $# -gt 0 && "$1" != -* ]]; then
         SUBCOMMAND="$1"
+        shift
+    fi
+
+    if [[ "$COMMAND" == "stop" && $# -gt 0 && "$1" != -* && "$1" != "--all" ]]; then
+        STOP_TARGET="$1"
         shift
     fi
 
@@ -2809,8 +3078,28 @@ parse_args() {
                 NO_CACHE_BUILD=1
                 shift
                 ;;
+            --use-buildkit)
+                USE_BUILDKIT=1
+                shift
+                ;;
             --rm)
                 REMOVE_ON_EXIT=1
+                shift
+                ;;
+            --all)
+                if [[ "$COMMAND" == "stop" ]]; then
+                    STOP_ALL=1
+                else
+                    die "Unknown argument: $1"
+                fi
+                shift
+                ;;
+            -a)
+                if [[ "$COMMAND" == "list" ]]; then
+                    LIST_ALL=1
+                else
+                    die "Unknown argument: $1"
+                fi
                 shift
                 ;;
             --print)
@@ -2862,6 +3151,12 @@ parse_args() {
                     continue
                 fi
 
+                if [[ "$COMMAND" == "stop" && -z "$STOP_TARGET" ]]; then
+                    STOP_TARGET="$1"
+                    shift
+                    continue
+                fi
+
                 if [[ "$COMMAND" == "open" && $explicit_command -eq 0 ]]; then
                     die "Unknown argument: $1"
                 fi
@@ -2907,6 +3202,14 @@ main() {
             ;;
         uninstall)
             command_uninstall
+            return 0
+            ;;
+        list)
+            command_list
+            return 0
+            ;;
+        stop)
+            command_stop
             return 0
             ;;
     esac
