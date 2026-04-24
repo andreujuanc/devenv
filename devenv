@@ -202,13 +202,14 @@ container_tool_help() {
         cat <<'EOF'
 Usage:
     devenv container-tool list
-    devenv container-tool check [jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|opencode ...]
-    devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|opencode ...> [--print]
+    devenv container-tool check [jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|claude|opencode ...]
+    devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|claude|opencode ...> [--print]
 
 Notes:
     - Container installs are mutable and can disappear when the container is recreated.
     - Move persistent tooling into the repo image once you know you want it.
     - `copilot` uses: curl -fsSL https://gh.io/copilot-install | bash
+    - `claude` uses: curl -fsSL https://claude.ai/install.sh | bash
     - `opencode` uses: curl -fsSL https://opencode.ai/install | bash
 EOF
 }
@@ -668,7 +669,7 @@ configure_automatic_ssh_agent_forwarding() {
 }
 
     configure_automatic_host_dir_mounts() {
-        local container_home host_dir rel_path target_dir
+        local container_home host_dir rel_path target_dir host_file target_file
 
         AUTO_HOST_DOTDIR_MOUNTING=0
         AUTO_HOST_MOUNT_SOURCES=()
@@ -680,7 +681,7 @@ configure_automatic_ssh_agent_forwarding() {
 
         container_home="$(container_home_dir)"
 
-        for rel_path in .copilot .gemini .opencode .local/share/opencode; do
+        for rel_path in .copilot .claude .gemini .opencode .local/share/opencode; do
             host_dir="$HOME/$rel_path"
             target_dir="$container_home/$rel_path"
 
@@ -698,6 +699,29 @@ configure_automatic_ssh_agent_forwarding() {
 
             if [[ "$SCENARIO" == "dockerfile" ]]; then
                 MOUNT_ARGS+=("--mount=type=bind,source=$host_dir,target=$target_dir")
+            fi
+        done
+
+        # Mount individual config files (e.g. OAuth session tokens) that live
+        # directly in $HOME rather than inside a dotdir.
+        for rel_path in .claude.json; do
+            host_file="$HOME/$rel_path"
+            target_file="$container_home/$rel_path"
+
+            if [[ ! -f "$host_file" ]]; then
+                continue
+            fi
+
+            if devcontainer_has_explicit_host_dir_config "$rel_path"; then
+                continue
+            fi
+
+            AUTO_HOST_DOTDIR_MOUNTING=1
+            AUTO_HOST_MOUNT_SOURCES+=("$host_file")
+            AUTO_HOST_MOUNT_TARGETS+=("$target_file")
+
+            if [[ "$SCENARIO" == "dockerfile" ]]; then
+                MOUNT_ARGS+=("--mount=type=bind,source=$host_file,target=$target_file")
             fi
         done
     }
@@ -1329,6 +1353,9 @@ normalize_helper_tool() {
         copilot|copilot-cli|github-copilot-cli)
             printf 'copilot\n'
             ;;
+        claude|claude-code|claude-code-cli)
+            printf 'claude\n'
+            ;;
         opencode)
             printf 'opencode\n'
             ;;
@@ -1349,7 +1376,7 @@ host_tool_supported() {
 
 container_tool_supported() {
     case "$1" in
-        jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|opencode)
+        jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|claude|opencode)
             return 0
             ;;
     esac
@@ -1381,6 +1408,7 @@ container_tool_list() {
     printf 'tree\n'
     printf 'lazygit\n'
     printf 'copilot\n'
+    printf 'claude\n'
     printf 'opencode\n'
 }
 
@@ -1588,6 +1616,9 @@ container_has_tool_script() {
         copilot)
             printf 'command -v copilot >/dev/null 2>&1\n'
             ;;
+        claude)
+            printf 'command -v claude >/dev/null 2>&1\n'
+            ;;
         opencode)
             printf 'command -v opencode >/dev/null 2>&1\n'
             ;;
@@ -1700,7 +1731,7 @@ command_container_tool_install() {
     local tool
     local script
 
-    require_tool_args "No container tools provided. Use: devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|opencode ...>"
+    require_tool_args "No container tools provided. Use: devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|claude|opencode ...>"
     validate_tool_args container
 
     if [[ $PRINT_ONLY -eq 1 ]]; then
@@ -1735,6 +1766,11 @@ $(script_asset_content "scripts/install/fresh.sh")"
                     printf '%s\n%s\n' \
                         'curl -fsSL https://gh.io/copilot-install | bash' \
                         "$(container_link_user_bin_script "copilot")"
+                    ;;
+                claude)
+                    printf '%s\n%s\n' \
+                        'curl -fsSL https://claude.ai/install.sh | bash' \
+                        "$(container_link_user_bin_script "claude")"
                     ;;
                 opencode)
                     printf '%s\n%s\n' \
@@ -1783,6 +1819,10 @@ $(script_asset_content "scripts/install/fresh.sh")"
             copilot)
                 run_container_shell_script "$container_id" 'curl -fsSL https://gh.io/copilot-install | bash'
                 run_container_shell_script_as_root "$container_id" "$(container_link_user_bin_script "copilot")"
+                ;;
+            claude)
+                run_container_shell_script "$container_id" 'curl -fsSL https://claude.ai/install.sh | bash'
+                run_container_shell_script_as_root "$container_id" "$(container_link_user_bin_script "claude")"
                 ;;
             opencode)
                 run_container_shell_script "$container_id" 'curl -fsSL https://opencode.ai/install | bash'
