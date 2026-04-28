@@ -345,12 +345,12 @@ fix_host_mount_ownership() {
 
     home_dir="$(container_home_dir_actual "$container_id")"
 
-    # chown the home dir and the .local subtree so the user can create
-    # directories inside it (e.g. .local/state, .local/cache).
+    # chown the home dir, .local, and .config subtrees so the user can create
+    # directories inside it (e.g. .config/opencode, .local/state).
     # Pass values as positional parameters to avoid injection via the sh -c string.
     docker exec -i -u root "$container_id" sh -c \
-        'chown "$1" "$2" "$2"/.local 2>/dev/null || true
-         chown -R "$1" "$2"/.local 2>/dev/null || true' \
+        'chown "$1" "$2" "$2"/.local "$2"/.config 2>/dev/null || true
+         chown -R "$1" "$2"/.local "$2"/.config 2>/dev/null || true' \
         -- "$REMOTE_USER" "$home_dir" \
         >/dev/null 2>&1 || true
 }
