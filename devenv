@@ -202,8 +202,8 @@ container_tool_help() {
         cat <<'EOF'
 Usage:
     devenv container-tool list
-    devenv container-tool check [jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|claude|opencode ...]
-    devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|claude|opencode ...> [--print]
+    devenv container-tool check [jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|claude|opencode|gh ...]
+    devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|claude|opencode|gh ...> [--print]
 
 Notes:
     - Container installs are mutable and can disappear when the container is recreated.
@@ -211,6 +211,7 @@ Notes:
     - `copilot` uses: curl -fsSL https://gh.io/copilot-install | bash
     - `claude` uses: curl -fsSL https://claude.ai/install.sh | bash
     - `opencode` uses: curl -fsSL https://opencode.ai/install | bash
+    - `gh` installs the latest GitHub CLI release
 EOF
 }
 
@@ -681,7 +682,7 @@ configure_automatic_ssh_agent_forwarding() {
 
         container_home="$(container_home_dir)"
 
-        for rel_path in .copilot .claude .gemini .opencode .local/share/opencode; do
+        for rel_path in .copilot .claude .gemini .opencode .local/share/opencode .config/gh .local/state/gh; do
             host_dir="$HOME/$rel_path"
             target_dir="$container_home/$rel_path"
 
@@ -1359,6 +1360,9 @@ normalize_helper_tool() {
         opencode)
             printf 'opencode\n'
             ;;
+        gh)
+            printf 'gh\n'
+            ;;
         *)
             printf '%s\n' "$1"
             ;;
@@ -1376,7 +1380,7 @@ host_tool_supported() {
 
 container_tool_supported() {
     case "$1" in
-        jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|claude|opencode)
+        jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|claude|opencode|gh)
             return 0
             ;;
     esac
@@ -1410,6 +1414,7 @@ container_tool_list() {
     printf 'copilot\n'
     printf 'claude\n'
     printf 'opencode\n'
+    printf 'gh\n'
 }
 
 require_tool_args() {
@@ -1604,7 +1609,7 @@ $(script_asset_content "scripts/install/zellij.sh")"
 
 container_has_tool_script() {
     case "$1" in
-        jq|git|ranger|lf|eza|tree|lazygit|micro|fresh)
+        jq|git|ranger|lf|eza|tree|lazygit|micro|fresh|gh)
             printf 'command -v %s >/dev/null 2>&1\n' "$1"
             ;;
         helix)
@@ -1688,6 +1693,11 @@ container_eza_install_script() {
         "$(script_asset_content "scripts/install/eza.sh")"
 }
 
+container_gh_install_script() {
+    printf 'DEVENV_INSTALL_SCOPE=container\nDEVENV_NEEDS_SUDO=0\nDEVENV_INSTALL_BIN_DIR=/usr/local/bin\n%s\n' \
+        "$(script_asset_content "scripts/install/gh.sh")"
+}
+
 container_lazygit_install_script() {
     printf 'DEVENV_INSTALL_SCOPE=container\nDEVENV_NEEDS_SUDO=0\nDEVENV_INSTALL_BIN_DIR=/usr/local/bin\nDEVENV_LAZYGIT_VERSION=%s\nDEVENV_ALLOW_APT_RELEASE=1\nDEVENV_ALLOW_DNF_PACKAGE=1\nDEVENV_ALLOW_PACMAN_PACKAGE=1\nDEVENV_ALLOW_ZYPPER_PACKAGE=1\nDEVENV_ALLOW_APK_PACKAGE=1\n%s\n' \
         "$(shell_escape "$LAZYGIT_VERSION")" \
@@ -1731,7 +1741,7 @@ command_container_tool_install() {
     local tool
     local script
 
-    require_tool_args "No container tools provided. Use: devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|claude|opencode ...>"
+    require_tool_args "No container tools provided. Use: devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|claude|opencode|gh ...>"
     validate_tool_args container
 
     if [[ $PRINT_ONLY -eq 1 ]]; then
@@ -1776,6 +1786,9 @@ $(script_asset_content "scripts/install/fresh.sh")"
                     printf '%s\n%s\n' \
                         'curl -fsSL https://opencode.ai/install | bash' \
                         "$(container_link_user_bin_script "opencode")"
+                    ;;
+                gh)
+                    printf '%s\n' "$(container_gh_install_script)"
                     ;;
             esac
         done
@@ -1827,6 +1840,9 @@ $(script_asset_content "scripts/install/fresh.sh")"
             opencode)
                 run_container_shell_script "$container_id" 'curl -fsSL https://opencode.ai/install | bash'
                 run_container_shell_script_as_root "$container_id" "$(container_link_user_bin_script "opencode")"
+                ;;
+            gh)
+                run_container_shell_script_as_root "$container_id" "$(container_gh_install_script)"
                 ;;
         esac
     done
