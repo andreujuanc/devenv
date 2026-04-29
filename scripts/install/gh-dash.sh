@@ -26,10 +26,12 @@ esac
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
-if command -v apt-get >/dev/null 2>&1; then
-    run_as_root apt-get update
-    if ! command -v curl >/dev/null 2>&1; then
-        run_as_root apt-get install -y curl
+if ! command -v curl >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+        run_as_root apt-get update
+        if ! command -v curl >/dev/null 2>&1; then
+            run_as_root apt-get install -y curl
+        fi
     fi
 fi
 

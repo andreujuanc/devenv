@@ -202,8 +202,8 @@ container_tool_help() {
         cat <<'EOF'
 Usage:
     devenv container-tool list
-    devenv container-tool check [jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|claude|opencode|gh|gh-dash ...]
-    devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|claude|opencode|gh|gh-dash ...> [--print]
+    devenv container-tool check [jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|claude|opencode|gh|gh-dash|delta ...]
+    devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|claude|opencode|gh|gh-dash|delta ...> [--print]
 
 Notes:
     - Container installs are mutable and can disappear when the container is recreated.
@@ -213,6 +213,7 @@ Notes:
     - `opencode` uses: curl -fsSL https://opencode.ai/install | bash
     - `gh` installs the latest GitHub CLI release
     - `gh-dash` installs the latest gh-dash release
+    - `delta` installs the git-delta pager
 EOF
 }
 
@@ -1367,6 +1368,9 @@ normalize_helper_tool() {
         gh-dash)
             printf 'gh-dash\n'
             ;;
+        delta)
+            printf 'delta\n'
+            ;;
         *)
             printf '%s\n' "$1"
             ;;
@@ -1384,7 +1388,7 @@ host_tool_supported() {
 
 container_tool_supported() {
     case "$1" in
-        jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|claude|opencode|gh|gh-dash)
+        jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|claude|opencode|gh|gh-dash|delta)
             return 0
             ;;
     esac
@@ -1614,7 +1618,7 @@ $(script_asset_content "scripts/install/zellij.sh")"
 
 container_has_tool_script() {
     case "$1" in
-        jq|git|ranger|lf|eza|tree|lazygit|micro|fresh|gh|gh-dash)
+        jq|git|ranger|lf|eza|tree|lazygit|micro|fresh|gh|gh-dash|delta)
             printf 'command -v %s >/dev/null 2>&1\n' "$1"
             ;;
         helix)
@@ -1703,6 +1707,11 @@ container_gh_install_script() {
         "$(script_asset_content "scripts/install/gh.sh")"
 }
 
+container_delta_install_script() {
+    printf 'DEVENV_INSTALL_SCOPE=container\nDEVENV_NEEDS_SUDO=0\nDEVENV_INSTALL_BIN_DIR=/usr/local/bin\n%s\n' \
+        "$(script_asset_content "scripts/install/delta.sh")"
+}
+
 container_gh_dash_install_script() {
     printf 'DEVENV_INSTALL_SCOPE=container\nDEVENV_NEEDS_SUDO=0\nDEVENV_INSTALL_BIN_DIR=/usr/local/bin\n%s\n' \
         "$(script_asset_content "scripts/install/gh-dash.sh")"
@@ -1751,7 +1760,7 @@ command_container_tool_install() {
     local tool
     local script
 
-    require_tool_args "No container tools provided. Use: devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|claude|opencode|gh|gh-dash ...>"
+    require_tool_args "No container tools provided. Use: devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|claude|opencode|gh|gh-dash|delta ...>"
     validate_tool_args container
 
     if [[ $PRINT_ONLY -eq 1 ]]; then
@@ -1801,9 +1810,11 @@ $(script_asset_content "scripts/install/fresh.sh")"
                     printf '%s\n' "$(container_gh_install_script)"
                     ;;
                 gh-dash)
-                    printf '%s\n%s\n' \
+                    printf '%s\n%s\n%s\n%s\n' \
+                        "$(container_delta_install_script)" \
                         "$(container_gh_dash_install_script)" \
-                        "mkdir -p ~/.local/share/gh/extensions/gh-dash && ln -sf /usr/local/bin/gh-dash ~/.local/share/gh/extensions/gh-dash/gh-dash"
+                        "mkdir -p ~/.local/share/gh/extensions/gh-dash && ln -sf /usr/local/bin/gh-dash ~/.local/share/gh/extensions/gh-dash/gh-dash" \
+                        "mkdir -p ~/.config/gh-dash && [ -f ~/.config/gh-dash/config.yml ] || echo \"pager:\n  diff: 'delta --side-by-side'\" > ~/.config/gh-dash/config.yml"
                     ;;
             esac
         done
@@ -1860,9 +1871,15 @@ $(script_asset_content "scripts/install/fresh.sh")"
                 run_container_shell_script_as_root "$container_id" "$(container_gh_install_script)"
                 ;;
             gh-dash)
+                run_container_shell_script_as_root "$container_id" "$(container_delta_install_script)"
                 run_container_shell_script_as_root "$container_id" "$(container_gh_dash_install_script)"
                 run_container_shell_script "$container_id" "mkdir -p ~/.local/share/gh/extensions/gh-dash && ln -sf /usr/local/bin/gh-dash ~/.local/share/gh/extensions/gh-dash/gh-dash"
+                run_container_shell_script "$container_id" "mkdir -p ~/.config/gh-dash && [ -f ~/.config/gh-dash/config.yml ] || echo \"pager:\n  diff: 'delta --side-by-side'\" > ~/.config/gh-dash/config.yml"
                 ;;
+            delta)
+                run_container_shell_script_as_root "$container_id" "$(container_delta_install_script)"
+                ;;
+
         esac
     done
 
