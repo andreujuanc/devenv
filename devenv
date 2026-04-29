@@ -1801,7 +1801,9 @@ $(script_asset_content "scripts/install/fresh.sh")"
                     printf '%s\n' "$(container_gh_install_script)"
                     ;;
                 gh-dash)
-                    printf '%s\n' "$(container_gh_dash_install_script)"
+                    printf '%s\n%s\n' \
+                        "$(container_gh_dash_install_script)" \
+                        "mkdir -p ~/.local/share/gh/extensions/gh-dash && ln -sf /usr/local/bin/gh-dash ~/.local/share/gh/extensions/gh-dash/gh-dash"
                     ;;
             esac
         done
@@ -1859,6 +1861,7 @@ $(script_asset_content "scripts/install/fresh.sh")"
                 ;;
             gh-dash)
                 run_container_shell_script_as_root "$container_id" "$(container_gh_dash_install_script)"
+                run_container_shell_script "$container_id" "mkdir -p ~/.local/share/gh/extensions/gh-dash && ln -sf /usr/local/bin/gh-dash ~/.local/share/gh/extensions/gh-dash/gh-dash"
                 ;;
         esac
     done
