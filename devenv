@@ -154,7 +154,7 @@ Commands:
     config     Print discovered repo and devcontainer settings.
     check      Validate host prerequisites and the repo contract.
     list       List running dev environments. Use -a to include stopped ones.
-    stop       Stop a dev environment by name, or all with --all.
+    stop       Stop a dev environment (current dir, by name, or --all).
     install    Install devenv into a directory on your PATH.
     uninstall  Remove an installed devenv from a directory on your PATH.
     help       Show this message.
@@ -202,8 +202,8 @@ container_tool_help() {
         cat <<'EOF'
 Usage:
     devenv container-tool list
-    devenv container-tool check [jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|claude|opencode|gh|gh-dash|delta ...]
-    devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|claude|opencode|gh|gh-dash|delta ...> [--print]
+    devenv container-tool check [jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|claude|opencode|gh|gh-dash|delta|prr ...]
+    devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|lazygit|copilot|claude|opencode|gh|gh-dash|delta|prr ...> [--print]
 
 Notes:
     - Container installs are mutable and can disappear when the container is recreated.
@@ -214,6 +214,7 @@ Notes:
     - `gh` installs the latest GitHub CLI release
     - `gh-dash` installs the latest gh-dash release
     - `delta` installs the git-delta pager
+    - `prr` installs the prr pull request review tool
 EOF
 }
 
@@ -684,7 +685,7 @@ configure_automatic_ssh_agent_forwarding() {
 
         container_home="$(container_home_dir)"
 
-        for rel_path in .copilot .claude .gemini .opencode .local/share/opencode .config/gh .local/state/gh .config/gh-dash .local/state/gh-dash; do
+        for rel_path in .copilot .claude .gemini .opencode .local/share/opencode .config/gh .local/state/gh .config/gh-dash .local/state/gh-dash .config/prr; do
             host_dir="$HOME/$rel_path"
             target_dir="$container_home/$rel_path"
 
@@ -1371,6 +1372,9 @@ normalize_helper_tool() {
         delta)
             printf 'delta\n'
             ;;
+        prr)
+            printf 'prr\n'
+            ;;
         *)
             printf '%s\n' "$1"
             ;;
@@ -1388,7 +1392,7 @@ host_tool_supported() {
 
 container_tool_supported() {
     case "$1" in
-        jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|claude|opencode|gh|gh-dash|delta)
+        jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|claude|opencode|gh|gh-dash|delta|prr)
             return 0
             ;;
     esac
@@ -1424,6 +1428,8 @@ container_tool_list() {
     printf 'opencode\n'
     printf 'gh\n'
     printf 'gh-dash\n'
+    printf 'delta\n'
+    printf 'prr\n'
 }
 
 require_tool_args() {
@@ -1618,7 +1624,7 @@ $(script_asset_content "scripts/install/zellij.sh")"
 
 container_has_tool_script() {
     case "$1" in
-        jq|git|ranger|lf|eza|tree|lazygit|micro|fresh|gh|gh-dash|delta)
+        jq|git|ranger|lf|eza|tree|lazygit|micro|fresh|gh|gh-dash|delta|prr)
             printf 'command -v %s >/dev/null 2>&1\n' "$1"
             ;;
         helix)
@@ -1707,6 +1713,11 @@ container_gh_install_script() {
         "$(script_asset_content "scripts/install/gh.sh")"
 }
 
+container_prr_install_script() {
+    printf 'DEVENV_INSTALL_SCOPE=container\nDEVENV_NEEDS_SUDO=0\nDEVENV_INSTALL_BIN_DIR=/usr/local/bin\n%s\n' \
+        "$(script_asset_content "scripts/install/prr.sh")"
+}
+
 container_delta_install_script() {
     printf 'DEVENV_INSTALL_SCOPE=container\nDEVENV_NEEDS_SUDO=0\nDEVENV_INSTALL_BIN_DIR=/usr/local/bin\n%s\n' \
         "$(script_asset_content "scripts/install/delta.sh")"
@@ -1760,7 +1771,7 @@ command_container_tool_install() {
     local tool
     local script
 
-    require_tool_args "No container tools provided. Use: devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|claude|opencode|gh|gh-dash|delta ...>"
+    require_tool_args "No container tools provided. Use: devenv container-tool install <jq|helix|micro|fresh|git|yazi|ranger|lf|eza|tree|lazygit|copilot|claude|opencode|gh|gh-dash|delta|prr ...>"
     validate_tool_args container
 
     if [[ $PRINT_ONLY -eq 1 ]]; then
@@ -1808,6 +1819,9 @@ $(script_asset_content "scripts/install/fresh.sh")"
                     ;;
                 gh)
                     printf '%s\n' "$(container_gh_install_script)"
+                    ;;
+                prr)
+                    printf '%s\n' "$(container_prr_install_script)"
                     ;;
                 gh-dash)
                     printf '%s\n%s\n%s\n%s\n' \
@@ -1878,6 +1892,9 @@ $(script_asset_content "scripts/install/fresh.sh")"
                 ;;
             delta)
                 run_container_shell_script_as_root "$container_id" "$(container_delta_install_script)"
+                ;;
+            prr)
+                run_container_shell_script_as_root "$container_id" "$(container_prr_install_script)"
                 ;;
 
         esac
@@ -2076,9 +2093,17 @@ container_path_exists() {
     local container_id="$1"
     local candidate_path="$2"
     local -a exec_args=()
+    local exit_code=0
 
     mapfile -d '' -t exec_args < <(docker_exec_base non-interactive "$container_id")
-    "${exec_args[@]}" /bin/sh -c "test -x $(shell_escape "$candidate_path")" >/dev/null 2>&1
+    "${exec_args[@]}" /bin/sh -c "test -x $(shell_escape "$candidate_path")" >/dev/null 2>&1 || exit_code=$?
+
+    # exit code 1 = test -x failed (path not found/not executable) — normal
+    # exit code >= 125 = docker exec itself failed (container not available)
+    if [[ $exit_code -ge 125 ]]; then
+        return 125
+    fi
+    return $exit_code
 }
 
 open_container_shell() {
@@ -2500,28 +2525,47 @@ stop_stack() {
 
 open_shell() {
     local container_id="$1"
+    local max_retries=3
+    local retry
 
     run_attach_lifecycle "$container_id"
 
-    if container_path_exists "$container_id" /bin/bash; then
-        open_container_shell "$container_id" /bin/bash
-        return
-    fi
+    for ((retry = 1; retry <= max_retries; retry++)); do
+        local shell_path=""
+        local probe_exit=0
 
-    if container_path_exists "$container_id" /usr/bin/bash; then
-        open_container_shell "$container_id" /usr/bin/bash
-        return
-    fi
+        for candidate in /bin/bash /usr/bin/bash /bin/sh /usr/bin/sh; do
+            container_path_exists "$container_id" "$candidate" || probe_exit=$?
+            if [[ $probe_exit -eq 0 ]]; then
+                shell_path="$candidate"
+                break
+            elif [[ $probe_exit -ge 125 ]]; then
+                # docker exec failed — container may be temporarily unavailable
+                break
+            fi
+            probe_exit=0
+        done
 
-    if container_path_exists "$container_id" /bin/sh; then
-        open_container_shell "$container_id" /bin/sh
-        return
-    fi
+        if [[ -n "$shell_path" ]]; then
+            open_container_shell "$container_id" "$shell_path"
+            return
+        fi
 
-    if container_path_exists "$container_id" /usr/bin/sh; then
-        open_container_shell "$container_id" /usr/bin/sh
-        return
-    fi
+        # If docker exec itself failed (not just "shell not found"), retry
+        if [[ $probe_exit -ge 125 ]]; then
+            if [[ "$(container_is_running "$container_id")" != "true" ]]; then
+                die "Service '$SERVICE_NAME' stopped unexpectedly before a shell could be opened"
+            fi
+            if [[ $retry -lt $max_retries ]]; then
+                sleep 1
+                continue
+            fi
+            die "Could not connect to the container to find a shell (container may not be ready)"
+        fi
+
+        # All probes ran successfully but no shell was found — no point retrying
+        break
+    done
 
     die "Could not find an interactive shell in the container"
 }
@@ -2916,7 +2960,37 @@ command_stop() {
     local failures=0
 
     if [[ -z "$target" && "$stop_all" -eq 0 ]]; then
-        die "Usage: devenv stop <name> | --all"
+        # No name and no --all: try to find the environment for the current directory
+        local current_path
+        current_path="$(pwd -P)"
+        local found_root=""
+
+        while [[ "$current_path" != "/" ]]; do
+            if [[ -f "$current_path/$DEFAULT_DEVCONTAINER_JSON" || -f "$current_path/$FALLBACK_DEVCONTAINER_JSON" ]]; then
+                found_root="$current_path"
+                break
+            fi
+            current_path="$(dirname "$current_path")"
+        done
+
+        if [[ -z "$found_root" ]]; then
+            die "Usage: devenv stop [<name> | --all]
+No devcontainer.json found in the current directory tree. Specify a name or use --all."
+        fi
+
+        # Match by PROJECT_ROOT in enumerated environments
+        _root_matcher() {
+            local name="$1" scenario="$2" status="$3" root="$4" container_id="$5" state_dir="$6"
+            if [[ "$root" == "$found_root" && "$status" == "running" ]]; then
+                STOP_TARGET="$name"
+            fi
+        }
+        enumerate_environments _root_matcher
+        target="$STOP_TARGET"
+
+        if [[ -z "$target" ]]; then
+            die "No running environment found for directory '$found_root'"
+        fi
     fi
 
     _stop_collector() {

@@ -3,5 +3,8 @@
   "dockerFile": "Dockerfile",
   "context": "..",
   "workspaceFolder": "/workspace",
-  "remoteUser": "node"
+  "remoteUser": "node",
+  "mounts": [
+    "source=${localEnv:HOME}/.claude,target=/home/node/.claude,type=bind,consistency=cached"
+  ]
 }
