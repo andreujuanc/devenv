@@ -2084,6 +2084,9 @@ docker_exec_base() {
         command+=(-u "$exec_user")
     fi
 
+    # Truecolor by default; remoteEnv/containerEnv still win because they are appended after.
+    command+=(-e "COLORTERM=${DEVENV_COLORTERM:-truecolor}")
+    command+=(-e "TERM=${DEVENV_TERM:-xterm-256color}")
     command+=("${remote_env_args[@]}")
     command+=(-w "$WORKSPACE_FOLDER" "$container_id")
     printf '%s\0' "${command[@]}"
