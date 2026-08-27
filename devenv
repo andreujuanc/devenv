@@ -133,6 +133,7 @@ Usage:
     devenv stop <name> | --all
     devenv install [--prefix PATH] [--force]
     devenv uninstall [--prefix PATH]
+    devenv version
     devenv help
 
 Commands:
@@ -157,6 +158,7 @@ Commands:
     stop       Stop a dev environment (current dir, by name, or --all).
     install    Install devenv into a directory on your PATH.
     uninstall  Remove an installed devenv from a directory on your PATH.
+    version    Show the devenv version and the fingerprint of this script.
     help       Show this message.
 
 Options:
@@ -2087,6 +2089,13 @@ docker_exec_base() {
     # Truecolor by default; remoteEnv/containerEnv still win because they are appended after.
     command+=(-e "COLORTERM=${DEVENV_COLORTERM:-truecolor}")
     command+=(-e "TERM=${DEVENV_TERM:-xterm-256color}")
+
+    # Claude Code resolves its config as $CLAUDE_CONFIG_DIR/.claude.json, so point it
+    # at the mounted ~/.claude dir instead of container-local ~/.claude.json, which
+    # is lost on rebuild.
+    if [[ "${DEVENV_NO_HOST_DOTDIR_FORWARDING:-0}" != "1" && -d "$HOME/.claude" ]]; then
+        command+=(-e "CLAUDE_CONFIG_DIR=${DEVENV_CLAUDE_CONFIG_DIR:-$(container_home_dir)/.claude}")
+    fi
     command+=("${remote_env_args[@]}")
     command+=(-w "$WORKSPACE_FOLDER" "$container_id")
     printf '%s\0' "${command[@]}"
@@ -3164,6 +3173,26 @@ EOF
     fi
 }
 
+command_version() {
+    local script_path fingerprint modified
+    script_path="$(self_path)"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        fingerprint="$(sha256sum "$script_path" | cut -c1-12)"
+    elif command -v shasum >/dev/null 2>&1; then
+        fingerprint="$(shasum -a 256 "$script_path" | cut -c1-12)"
+    else
+        fingerprint="unavailable"
+    fi
+
+    modified="$(stat -c %y "$script_path" 2>/dev/null || stat -f %Sm "$script_path" 2>/dev/null || printf 'unknown')"
+
+    printf 'devenv %s\n' "$VERSION"
+    printf 'path:     %s\n' "$script_path"
+    printf 'sha256:   %s\n' "$fingerprint"
+    printf 'modified: %s\n' "$modified"
+}
+
 command_check() {
     require_runtime_prereqs
     emit_spec_warnings
@@ -3185,13 +3214,17 @@ parse_args() {
 
     if [[ $# -gt 0 ]]; then
         case "$1" in
-            dev|vibe|ide|open|up|down|status|shell|exec|tool|host-tool|container-tool|host-tmux|logs|ps|config|check|list|stop|install|uninstall|help)
+            dev|vibe|ide|open|up|down|status|shell|exec|tool|host-tool|container-tool|host-tmux|logs|ps|config|check|list|stop|install|uninstall|version|help)
                 COMMAND="$1"
                 explicit_command=1
                 shift
                 ;;
             -h|--help)
                 COMMAND="help"
+                shift
+                ;;
+            -v|--version)
+                COMMAND="version"
                 shift
                 ;;
         esac
@@ -3342,6 +3375,10 @@ main() {
     case "$COMMAND" in
         help)
             usage
+            return 0
+            ;;
+        version)
+            command_version
             return 0
             ;;
         ide)
