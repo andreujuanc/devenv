@@ -10,6 +10,8 @@ FRESH_VERSION="0.2.14"
 DEFAULT_DEVCONTAINER_JSON=".devcontainer/devcontainer.json"
 FALLBACK_DEVCONTAINER_JSON=".devcontainer.json"
 DEFAULT_INSTALL_PREFIX="${HOME}/.local/bin"
+DEFAULT_NEW_IMAGE="node:26"
+DEFAULT_NEW_USER="node"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -26,6 +28,8 @@ PROJECT_NAME_OVERRIDE=""
 SERVICE_OVERRIDE=""
 REMOVE_ON_EXIT=0
 INSTALL_PREFIX="$DEFAULT_INSTALL_PREFIX"
+NEW_IMAGE="$DEFAULT_NEW_IMAGE"
+NEW_USER="$DEFAULT_NEW_USER"
 FORCE_INSTALL=0
 NO_CACHE_BUILD=0
 USE_BUILDKIT="${DEVENV_USE_BUILDKIT:-0}"
@@ -135,6 +139,7 @@ Usage:
     devenv ps [--workspace PATH] [--project-name NAME]
     devenv config [--workspace PATH] [--project-name NAME]
     devenv check [--workspace PATH]
+    devenv new [--workspace PATH] [--image REF] [--user NAME] [--force] [--print]
     devenv list [-a]
     devenv stop <name> | --all
     devenv install [--prefix PATH] [--force]
@@ -160,6 +165,7 @@ Commands:
     status     Run a non-mutating environment health check.
     config     Print discovered repo and devcontainer settings.
     check      Validate host prerequisites and the repo contract.
+    new        Write a starter .devcontainer/devcontainer.json and Dockerfile.
     list       List running dev environments. Use -a to include stopped ones.
     stop       Stop a dev environment (current dir, by name, or --all).
     install    Install devenv into a directory on your PATH.
@@ -174,6 +180,8 @@ Options:
                         created, so nothing else can reach your credentials.
                         Tools with a host folder: claude, gh (covers gh-dash), copilot,
                         opencode, gemini, prr.
+    --image             Base image for `devenv new`. Defaults to node:26.
+    --user              Container user for `devenv new`. Defaults to node.
     --yes, -y           Pre-approve the questions devenv would ask, for scripts and CI.
                         DEVENV_YES=1 does the same.
     --no-repo-mounts    Start without the host mounts a repo asks for itself.
@@ -2306,6 +2314,81 @@ command_install() {
     fi
 }
 
+new_devcontainer_json() {
+    cat <<EOF
+{
+  "name": "$1",
+  "dockerFile": "Dockerfile",
+  "context": "..",
+  "workspaceFolder": "/workspace",
+  "remoteUser": "$NEW_USER"
+}
+EOF
+}
+
+# Debian-based images only, which covers the node, python, and ubuntu bases.
+new_dockerfile() {
+    cat <<EOF
+FROM $NEW_IMAGE
+
+ARG USERNAME=$NEW_USER
+
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+        ca-certificates curl git jq less man-db sudo \\
+    && rm -rf /var/lib/apt/lists/*
+
+# Create the user when the base image does not already provide one
+RUN id -u "\$USERNAME" >/dev/null 2>&1 \\
+    || (groupadd --gid 1000 "\$USERNAME" \\
+        && useradd --uid 1000 --gid 1000 --create-home "\$USERNAME")
+
+RUN echo "\$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/"\$USERNAME" \\
+    && chmod 0440 /etc/sudoers.d/"\$USERNAME"
+
+ENV DEVCONTAINER=true
+
+WORKDIR /workspace
+EOF
+}
+
+command_new() {
+    local target_root devcontainer_dir json_path dockerfile_path project_display existing
+
+    target_root="$(resolve_workspace_start)"
+    if [[ -f "$target_root" ]]; then
+        target_root="$(dirname "$target_root")"
+    fi
+
+    devcontainer_dir="$target_root/.devcontainer"
+    json_path="$devcontainer_dir/devcontainer.json"
+    dockerfile_path="$devcontainer_dir/Dockerfile"
+    project_display="$(basename "$target_root")"
+
+    if [[ $PRINT_ONLY -eq 1 ]]; then
+        printf '# %s\n' "$json_path"
+        new_devcontainer_json "$project_display"
+        printf '\n# %s\n' "$dockerfile_path"
+        new_dockerfile
+        return 0
+    fi
+
+    if [[ $FORCE_INSTALL -eq 0 ]]; then
+        for existing in "$json_path" "$dockerfile_path"; do
+            if [[ -e "$existing" ]]; then
+                die "'$existing' already exists. Re-run with --force to replace it."
+            fi
+        done
+    fi
+
+    mkdir -p "$devcontainer_dir"
+    new_devcontainer_json "$project_display" > "$json_path"
+    new_dockerfile > "$dockerfile_path"
+
+    print_success "Created $json_path"
+    print_success "Created $dockerfile_path"
+    print_step "Start it with: devenv up"
+}
+
 command_uninstall() {
     local target_path
     target_path="$(install_target_path)"
@@ -3550,6 +3633,8 @@ command_check() {
 
 parse_args() {
     COMMAND="open"
+    NEW_IMAGE="$DEFAULT_NEW_IMAGE"
+    NEW_USER="$DEFAULT_NEW_USER"
     WITH_TOOLS=()
     REPO_MOUNTS_POLICY="${DEVENV_REPO_MOUNTS:-ask}"
     EXEC_ARGS=()
@@ -3564,7 +3649,7 @@ parse_args() {
 
     if [[ $# -gt 0 ]]; then
         case "$1" in
-            dev|vibe|ide|open|up|down|status|shell|exec|tool|host-tool|container-tool|host-tmux|logs|ps|config|check|list|stop|install|uninstall|version|help)
+            dev|vibe|ide|open|up|down|status|shell|exec|tool|host-tool|container-tool|host-tmux|logs|ps|config|check|list|stop|new|install|uninstall|version|help)
                 COMMAND="$1"
                 explicit_command=1
                 shift
@@ -3602,6 +3687,16 @@ parse_args() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --image)
+                [[ $# -ge 2 ]] || die "Missing value for $1"
+                NEW_IMAGE="$2"
+                shift 2
+                ;;
+            --user)
+                [[ $# -ge 2 ]] || die "Missing value for $1"
+                NEW_USER="$2"
+                shift 2
+                ;;
             --with)
                 [[ $# -ge 2 ]] || die "Missing value for $1"
                 add_with_tools "$2"
@@ -3774,6 +3869,10 @@ main() {
             fi
             ;;
         dev|vibe|host-tmux)
+            ;;
+        new)
+            command_new
+            return 0
             ;;
         install)
             command_install
