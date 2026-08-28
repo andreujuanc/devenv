@@ -65,6 +65,12 @@ declare -a FORWARD_PORTS=()
 declare -a PORT_ARGS=()
 declare -a AUTO_HOST_MOUNT_SOURCES=()
 declare -a AUTO_HOST_MOUNT_TARGETS=()
+declare -a WITH_TOOLS=()
+declare -a WARNED_MOUNT_TOOLS=()
+declare -a REPO_MOUNT_LINES=()
+declare -a REPO_MOUNT_SPECS=()
+declare -a SENSITIVE_REPO_MOUNT_SPECS=()
+REPO_MOUNTS_POLICY="${DEVENV_REPO_MOUNTS:-ask}"
 
 cleanup() {
     if [[ -n "$DEVCONTAINER_CACHE" && -f "$DEVCONTAINER_CACHE" ]]; then
@@ -115,11 +121,11 @@ Usage:
     devenv dev [--workspace PATH] [--project-name NAME] [--service NAME] [--rm] [--no-cache] [--use-buildkit]
     devenv vibe [--workspace PATH] [--project-name NAME] [--service NAME] [--rm] [--no-cache] [--use-buildkit]
     devenv ide [--workspace PATH] [--project-name NAME] [--service NAME] [--rm] [--no-cache] [--use-buildkit]
-    devenv open [project_name] [--workspace PATH] [--rm] [--no-cache] [--use-buildkit]
-    devenv up [--workspace PATH] [--project-name NAME] [--no-cache] [--use-buildkit]
+    devenv open [project_name] [--workspace PATH] [--rm] [--no-cache] [--use-buildkit] [--with TOOLS]
+    devenv up [--workspace PATH] [--project-name NAME] [--no-cache] [--use-buildkit] [--with TOOLS]
     devenv down [--workspace PATH] [--project-name NAME]
     devenv status [--workspace PATH] [--project-name NAME] [--service NAME]
-    devenv shell [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [--use-buildkit]
+    devenv shell [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [--use-buildkit] [--with TOOLS]
     devenv exec [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [--use-buildkit] -- <command> [args...]
     devenv tool <helix|micro|fresh|editor|tmux|files|tree|git|ai> [--workspace PATH] [--project-name NAME] [--service NAME] [--no-cache] [--use-buildkit] [-- args...]
     devenv host-tool <list|check|install> [tool...] [--print]
@@ -162,6 +168,16 @@ Commands:
     help       Show this message.
 
 Options:
+    --with              Comma-separated tools a new container may use, e.g. --with claude,gh.
+                        Mounts each tool's host config folder and installs the tool.
+                        Repeatable. Folders are granted only when the container is
+                        created, so nothing else can reach your credentials.
+                        Tools with a host folder: claude, gh (covers gh-dash), copilot,
+                        opencode, gemini, prr.
+    --yes, -y           Pre-approve the questions devenv would ask, for scripts and CI.
+                        DEVENV_YES=1 does the same.
+    --no-repo-mounts    Start without the host mounts a repo asks for itself.
+    --allow-repo-mounts Allow them without asking.
     --workspace, -w     Workspace or subdirectory inside the target repo.
     --project-name, -p  Override the derived compose project name.
     --service, -s       Override the primary service from devcontainer.json.
@@ -174,6 +190,12 @@ Options:
     --help, -h          Show this message.
 
 Notes:
+    - Host folders holding credentials are mounted only when you name their tool with
+      `--with`, so a repo you are just looking at cannot read them.
+    - A repo can still ask for host mounts in its own devcontainer.json or compose file.
+      devenv lists those and asks before honouring them, once, when the container is
+      created. With no terminal to ask, it starts without them, or refuses if they
+      cannot be removed. `--yes` pre-approves.
     - v1 is intentionally shell-only and does not use the devcontainer CLI.
     - v1 supports compose-backed devcontainers and Dockerfile-based devcontainers.
     - Editor customizations, features, and automatic port forwarding are not applied by this wrapper.
@@ -209,6 +231,8 @@ Usage:
 
 Notes:
     - Container installs are mutable and can disappear when the container is recreated.
+    - Tools that keep credentials on the host (claude, gh, gh-dash, copilot, opencode,
+      gemini, prr) only see them when the container was created with `devenv up --with`.
     - Move persistent tooling into the repo image once you know you want it.
     - `copilot` uses: curl -fsSL https://gh.io/copilot-install | bash
     - `claude` uses: curl -fsSL https://claude.ai/install.sh | bash
@@ -675,7 +699,7 @@ configure_automatic_ssh_agent_forwarding() {
 }
 
     configure_automatic_host_dir_mounts() {
-        local container_home host_dir rel_path target_dir host_file target_file
+        local container_home host_dir rel_path target_dir
 
         AUTO_HOST_DOTDIR_MOUNTING=0
         AUTO_HOST_MOUNT_SOURCES=()
@@ -695,6 +719,10 @@ configure_automatic_ssh_agent_forwarding() {
                 continue
             fi
 
+            if ! host_dir_granted "$rel_path"; then
+                continue
+            fi
+
             if devcontainer_has_explicit_host_dir_config "$rel_path"; then
                 continue
             fi
@@ -708,28 +736,8 @@ configure_automatic_ssh_agent_forwarding() {
             fi
         done
 
-        # Mount individual config files (e.g. OAuth session tokens) that live
-        # directly in $HOME rather than inside a dotdir.
-        for rel_path in .claude.json; do
-            host_file="$HOME/$rel_path"
-            target_file="$container_home/$rel_path"
-
-            if [[ ! -f "$host_file" ]]; then
-                continue
-            fi
-
-            if devcontainer_has_explicit_host_dir_config "$rel_path"; then
-                continue
-            fi
-
-            AUTO_HOST_DOTDIR_MOUNTING=1
-            AUTO_HOST_MOUNT_SOURCES+=("$host_file")
-            AUTO_HOST_MOUNT_TARGETS+=("$target_file")
-
-            if [[ "$SCENARIO" == "dockerfile" ]]; then
-                MOUNT_ARGS+=("--mount=type=bind,source=$host_file,target=$target_file")
-            fi
-        done
+        # ~/.claude.json needs no mount of its own: CLAUDE_CONFIG_DIR (see
+        # docker_exec_base) keeps Claude's config inside the mounted .claude dir.
     }
 
 field_type() {
@@ -899,6 +907,7 @@ resolve_dockerfile_settings() {
     CONTAINER_ENV_ARGS=()
 
     MOUNT_ARGS=()
+    REPO_MOUNT_SPECS=()
     while IFS= read -r mount_spec; do
         [[ -n "$mount_spec" ]] || continue
         mount_spec="$(expand_devcontainer_value "$mount_spec")"
@@ -906,6 +915,7 @@ resolve_dockerfile_settings() {
             continue
         fi
         MOUNT_ARGS+=("--mount=$mount_spec")
+        REPO_MOUNT_SPECS+=("$mount_spec")
     done < <(json_query_lines '.mounts // [] | .[]')
 }
 
@@ -1434,6 +1444,113 @@ container_tool_list() {
     printf 'prr\n'
 }
 
+# Host folders a tool needs bind-mounted to keep its settings and credentials.
+# Access is granted per container at creation time with `devenv up --with <tools>`;
+# nothing is recorded on the host, so a container's own mounts are the record of
+# what it was granted.
+mount_group_list() {
+    printf '%s\n' claude gh copilot opencode gemini prr
+}
+
+mount_group_dirs() {
+    case "$1" in
+        claude)
+            printf '%s\n' .claude
+            ;;
+        gh)
+            printf '%s\n' .config/gh .local/state/gh .config/gh-dash .local/state/gh-dash
+            ;;
+        copilot)
+            printf '%s\n' .copilot
+            ;;
+        opencode)
+            printf '%s\n' .opencode .local/share/opencode
+            ;;
+        gemini)
+            printf '%s\n' .gemini
+            ;;
+        prr)
+            printf '%s\n' .config/prr
+            ;;
+    esac
+}
+
+# gh-dash reads gh's login, so it belongs to the gh group.
+tool_mount_group() {
+    case "$1" in
+        gh|gh-dash)
+            printf 'gh\n'
+            ;;
+        claude|copilot|opencode|gemini|prr)
+            printf '%s\n' "$1"
+            ;;
+    esac
+}
+
+dir_mount_group() {
+    local group dir
+
+    while IFS= read -r group; do
+        while IFS= read -r dir; do
+            if [[ "$dir" == "$1" ]]; then
+                printf '%s\n' "$group"
+                return 0
+            fi
+        done < <(mount_group_dirs "$group")
+    done < <(mount_group_list)
+
+    return 1
+}
+
+with_tool_selected() {
+    local tool
+
+    for tool in "${WITH_TOOLS[@]}"; do
+        if [[ "$tool" == "$1" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+host_dir_granted() {
+    local owner tool
+
+    owner="$(dir_mount_group "$1")" || return 1
+
+    for tool in "${WITH_TOOLS[@]}"; do
+        if [[ "$(tool_mount_group "$tool")" == "$owner" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+with_tool_valid() {
+    container_tool_supported "$1" || [[ -n "$(tool_mount_group "$1")" ]]
+}
+
+add_with_tools() {
+    local raw="$1"
+    local -a requested=()
+    local name canonical
+
+    IFS=',' read -r -a requested <<< "$raw"
+
+    for name in "${requested[@]}"; do
+        [[ -n "$name" ]] || continue
+        canonical="$(normalize_helper_tool "$name")"
+
+        if ! with_tool_valid "$canonical"; then
+            die "Unknown --with tool '$name'. Valid: $(container_tool_list | tr '\n' ' ')gemini"
+        fi
+
+        with_tool_selected "$canonical" || WITH_TOOLS+=("$canonical")
+    done
+}
+
 require_tool_args() {
     [[ ${#TOOL_ARGS[@]} -gt 0 ]] || die "$1"
 }
@@ -1907,6 +2024,220 @@ $(script_asset_content "scripts/install/fresh.sh")"
         script="$(container_package_install_script "$joined_packages")"
         run_container_shell_script_as_root "$container_id" "$script"
     fi
+
+    warn_unmounted_tool_dirs "$container_id" "${TOOL_ARGS[@]}"
+}
+
+# A repo can mount your home folder, or the Docker socket, in its own config.  That
+# bypasses --with completely, so ask before honouring it.  Only ever asked when a
+# container is created.
+repo_mount_is_sensitive() {
+    local mount_source="$1"
+
+    if [[ "$mount_source" == "/var/run/docker.sock" ]]; then
+        return 0
+    fi
+
+    if [[ -n "$PROJECT_ROOT" && ( "$mount_source" == "$PROJECT_ROOT" || "$mount_source" == "$PROJECT_ROOT"/* ) ]]; then
+        return 1
+    fi
+
+    [[ "$mount_source" == "$HOME" || "$mount_source" == "$HOME"/* ]]
+}
+
+collect_sensitive_repo_mounts() {
+    local mount_spec mount_source mount_target volume_line
+
+    REPO_MOUNT_LINES=()
+    SENSITIVE_REPO_MOUNT_SPECS=()
+
+    if [[ "$SCENARIO" == "dockerfile" ]]; then
+        for mount_spec in "${REPO_MOUNT_SPECS[@]}"; do
+            mount_source="$(mount_spec_value "$mount_spec" source || mount_spec_value "$mount_spec" src || true)"
+            mount_target="$(mount_spec_value "$mount_spec" target || mount_spec_value "$mount_spec" destination || mount_spec_value "$mount_spec" dst || true)"
+            [[ -n "$mount_source" ]] || continue
+            repo_mount_is_sensitive "$mount_source" || continue
+
+            REPO_MOUNT_LINES+=("$mount_source -> ${mount_target:-?}")
+            SENSITIVE_REPO_MOUNT_SPECS+=("$mount_spec")
+        done
+        return 0
+    fi
+
+    # Compose repos declare their mounts in the compose file, so read them back
+    # from the resolved config rather than from devcontainer.json.
+    if ! volume_line="$(compose config --format json 2>/dev/null)"; then
+        print_warning "Could not read the compose config, so this repo's mounts were not reviewed"
+        return 0
+    fi
+
+    while IFS=$'\t' read -r mount_source mount_target; do
+        [[ -n "$mount_source" ]] || continue
+        repo_mount_is_sensitive "$mount_source" || continue
+        REPO_MOUNT_LINES+=("$mount_source -> ${mount_target:-?}")
+    done < <(jq -r --arg svc "$SERVICE_NAME" '
+        .services[$svc].volumes // []
+        | .[]
+        | select((.type // "bind") == "bind")
+        | "\(.source // "")\t\(.target // "")"
+    ' <<< "$volume_line" 2>/dev/null)
+}
+
+drop_sensitive_repo_mounts() {
+    local mount_spec keep
+    local -a kept=()
+
+    for mount_spec in "${MOUNT_ARGS[@]}"; do
+        keep=1
+        if array_contains "${mount_spec#--mount=}" "${SENSITIVE_REPO_MOUNT_SPECS[@]}"; then
+            keep=0
+        fi
+        [[ $keep -eq 1 ]] && kept+=("$mount_spec")
+    done
+
+    MOUNT_ARGS=("${kept[@]}")
+}
+
+review_repo_host_mounts() {
+    local line answer can_skip=0
+
+    collect_sensitive_repo_mounts
+
+    if [[ ${#REPO_MOUNT_LINES[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    # Only the Dockerfile path builds its own mount list, so only it can start without them.
+    [[ "$SCENARIO" == "dockerfile" ]] && can_skip=1
+
+    if [[ "${DEVENV_YES:-0}" == "1" ]]; then
+        REPO_MOUNTS_POLICY="allow"
+    fi
+
+    if [[ "$REPO_MOUNTS_POLICY" == "allow" ]]; then
+        return 0
+    fi
+
+    print_warning "This repo wants to mount:"
+    for line in "${REPO_MOUNT_LINES[@]}"; do
+        printf '    %s\n' "$line" >&2
+    done
+
+    if [[ "$REPO_MOUNTS_POLICY" != "skip" && -t 0 && -t 2 ]]; then
+        if [[ $can_skip -eq 1 ]]; then
+            printf '  [a] allow  [s] start without them  [q] cancel: ' >&2
+        else
+            printf '  [a] allow  [q] cancel (compose mounts cannot be removed): ' >&2
+        fi
+
+        read -r answer || answer="q"
+
+        case "$answer" in
+            a|A)
+                return 0
+                ;;
+            s|S)
+                if [[ $can_skip -eq 1 ]]; then
+                    REPO_MOUNTS_POLICY="skip"
+                else
+                    die "Cancelled. These mounts cannot be removed from a compose repo."
+                fi
+                ;;
+            *)
+                die "Cancelled"
+                ;;
+        esac
+    fi
+
+    # No terminal, or an explicit skip: leave them out where we can, refuse where we cannot.
+    if [[ $can_skip -eq 0 ]]; then
+        die "Refusing to start with these mounts. Pass --yes to allow them, or start this repo yourself."
+    fi
+
+    drop_sensitive_repo_mounts
+    print_warning "Starting without those mounts. Pass --yes to allow them."
+}
+
+array_contains() {
+    local needle="$1"
+    shift
+
+    local item
+    for item in "$@"; do
+        if [[ "$item" == "$needle" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Mounts are fixed when a container is created, so a tool asked for later cannot
+# get its folder without recreating.  Say so instead of recreating anything.
+warn_unmounted_tool_dirs() {
+    local container_id="$1"
+    shift
+
+    local tool group dir container_home target
+    local -a mounted=()
+
+    [[ $# -gt 0 ]] || return 0
+
+    mapfile -t mounted < <(docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' "$container_id" 2>/dev/null)
+    container_home="$(container_home_dir_actual "$container_id")"
+
+    for tool in "$@"; do
+        group="$(tool_mount_group "$tool")"
+        [[ -n "$group" ]] || continue
+        array_contains "$tool" "${WARNED_MOUNT_TOOLS[@]}" && continue
+
+        while IFS= read -r dir; do
+            [[ -d "$HOME/$dir" ]] || continue
+            target="$container_home/$dir"
+
+            if ! array_contains "$target" "${mounted[@]}"; then
+                WARNED_MOUNT_TOOLS+=("$tool")
+                print_warning "$tool: $target is not mounted in this container.
+  Settings and credentials will not persist. To fix:
+      devenv down && devenv up --with $tool"
+                break
+            fi
+        done < <(mount_group_dirs "$group")
+    done
+}
+
+# Install whatever `--with` asked for, skipping tools the container already has.
+install_with_tools() {
+    local container_id="$1"
+    local tool check_script
+    local -a pending=()
+    local -a previous_tool_args=()
+    local previous_print_only="$PRINT_ONLY"
+
+    [[ ${#WITH_TOOLS[@]} -gt 0 ]] || return 0
+
+    for tool in "${WITH_TOOLS[@]}"; do
+        container_tool_supported "$tool" || continue
+
+        check_script="$(container_has_tool_script "$tool")" || check_script=""
+        if [[ -n "$check_script" ]] && run_container_shell_script "$container_id" "$check_script" >/dev/null 2>&1; then
+            continue
+        fi
+
+        pending+=("$tool")
+    done
+
+    if [[ ${#pending[@]} -gt 0 ]]; then
+        print_step "Installing container tools: ${pending[*]}"
+        previous_tool_args=("${TOOL_ARGS[@]}")
+        TOOL_ARGS=("${pending[@]}")
+        PRINT_ONLY=0
+        command_container_tool_install
+        PRINT_ONLY="$previous_print_only"
+        TOOL_ARGS=("${previous_tool_args[@]}")
+    fi
+
+    warn_unmounted_tool_dirs "$container_id" "${WITH_TOOLS[@]}"
 }
 
 command_host_tool() {
@@ -2436,6 +2767,10 @@ start_stack() {
     previous_container_id="$(service_container_id)"
     previous_running="$(container_is_running "$previous_container_id")"
 
+    if [[ -z "$previous_container_id" ]]; then
+        review_repo_host_mounts
+    fi
+
     run_host_command initializeCommand
 
     print_step "Starting environment '$DISPLAY_NAME'"
@@ -2598,6 +2933,7 @@ command_open() {
     local exit_code=0
 
     container_id="$(ensure_running)"
+    install_with_tools "$container_id"
     print_step "Opening shell in service '$SERVICE_NAME'"
     if [[ $REMOVE_ON_EXIT -eq 1 ]]; then
         print_warning "Services will stop when this shell exits"
@@ -2613,7 +2949,14 @@ command_open() {
 }
 
 command_up() {
+    local container_id
+
     start_stack
+
+    if [[ ${#WITH_TOOLS[@]} -gt 0 ]]; then
+        container_id="$(ensure_running)"
+        install_with_tools "$container_id"
+    fi
 }
 
 command_down() {
@@ -2625,6 +2968,7 @@ command_shell() {
     local exit_code=0
 
     container_id="$(ensure_running)"
+    install_with_tools "$container_id"
     print_step "Opening shell in service '$SERVICE_NAME'"
     open_shell "$container_id" || exit_code=$?
 
@@ -2770,6 +3114,7 @@ command_host_tmux() {
 }
 
 command_dev() {
+    local container_id
     local launcher_path
     local session_name
     local exit_code=0
@@ -2778,7 +3123,8 @@ command_dev() {
 
     launcher_path="$(self_path)"
     session_name="$(build_zellij_session_name)"
-    ensure_running >/dev/null
+    container_id="$(ensure_running)"
+    install_with_tools "$container_id"
     write_dev_session_layout "$launcher_path"
     write_dev_session_shell_launcher "$launcher_path"
 
@@ -2792,6 +3138,7 @@ command_dev() {
 }
 
 command_vibe() {
+    local container_id
     local launcher_path
     local session_name
     local exit_code=0
@@ -2800,7 +3147,8 @@ command_vibe() {
 
     launcher_path="$(self_path)"
     session_name="$(build_zellij_session_name)"
-    ensure_running >/dev/null
+    container_id="$(ensure_running)"
+    install_with_tools "$container_id"
     write_vibe_session_layout "$launcher_path"
     write_dev_session_shell_launcher "$launcher_path"
 
@@ -3202,6 +3550,8 @@ command_check() {
 
 parse_args() {
     COMMAND="open"
+    WITH_TOOLS=()
+    REPO_MOUNTS_POLICY="${DEVENV_REPO_MOUNTS:-ask}"
     EXEC_ARGS=()
     TOOL_NAME=""
     SUBCOMMAND=""
@@ -3252,6 +3602,19 @@ parse_args() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --with)
+                [[ $# -ge 2 ]] || die "Missing value for $1"
+                add_with_tools "$2"
+                shift 2
+                ;;
+            --yes|-y|--allow-repo-mounts)
+                REPO_MOUNTS_POLICY="allow"
+                shift
+                ;;
+            --no-repo-mounts)
+                REPO_MOUNTS_POLICY="skip"
+                shift
+                ;;
             --workspace|-w)
                 [[ $# -ge 2 ]] || die "Missing value for $1"
                 WORKSPACE_HINT="$2"
@@ -3367,6 +3730,16 @@ parse_args() {
                 ;;
         esac
     done
+
+    if [[ ${#WITH_TOOLS[@]} -gt 0 ]]; then
+        case "$COMMAND" in
+            up|open|dev|vibe|ide|shell|config)
+                ;;
+            *)
+                die "--with is only supported by: up, open, dev, vibe, shell, config"
+                ;;
+        esac
+    fi
 }
 
 main() {
