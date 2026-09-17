@@ -37,6 +37,7 @@ DISPLAY_NAME=""
 SCENARIO=""
 SERVICE_NAME=""
 WORKSPACE_FOLDER=""
+REPO_ALIAS_FOLDER=""
 REMOTE_USER=""
 PROJECT_NAME=""
 PROJECT_HASH=""
@@ -69,6 +70,8 @@ declare -a FORWARD_PORTS=()
 declare -a PORT_ARGS=()
 declare -a AUTO_HOST_MOUNT_SOURCES=()
 declare -a AUTO_HOST_MOUNT_TARGETS=()
+declare -a EXTRA_MOUNT_SOURCES=()
+declare -a EXTRA_MOUNT_TARGETS=()
 declare -a WITH_TOOLS=()
 declare -a WARNED_MOUNT_TOOLS=()
 declare -a REPO_MOUNT_LINES=()
@@ -615,7 +618,7 @@ write_compose_runtime_override() {
         return
     fi
 
-    if [[ $AUTO_SSH_AGENT_FORWARDING -eq 0 && ${#FORWARD_PORTS[@]} -eq 0 && ${#AUTO_HOST_MOUNT_SOURCES[@]} -eq 0 ]]; then
+    if [[ $AUTO_SSH_AGENT_FORWARDING -eq 0 && ${#FORWARD_PORTS[@]} -eq 0 && ${#AUTO_HOST_MOUNT_SOURCES[@]} -eq 0 && ${#EXTRA_MOUNT_SOURCES[@]} -eq 0 ]]; then
         return
     fi
 
@@ -632,7 +635,7 @@ write_compose_runtime_override() {
             printf "      SSH_AUTH_SOCK: '%s'\n" "$quoted_target"
         fi
 
-        if [[ $AUTO_SSH_AGENT_FORWARDING -eq 1 || ${#AUTO_HOST_MOUNT_SOURCES[@]} -gt 0 ]]; then
+        if [[ $AUTO_SSH_AGENT_FORWARDING -eq 1 || ${#AUTO_HOST_MOUNT_SOURCES[@]} -gt 0 || ${#EXTRA_MOUNT_SOURCES[@]} -gt 0 ]]; then
             printf '    volumes:\n'
         fi
 
@@ -649,6 +652,16 @@ write_compose_runtime_override() {
             for index in "${!AUTO_HOST_MOUNT_SOURCES[@]}"; do
                 quoted_source="$(yaml_single_quote "${AUTO_HOST_MOUNT_SOURCES[$index]}")"
                 quoted_target="$(yaml_single_quote "${AUTO_HOST_MOUNT_TARGETS[$index]}")"
+                printf '      - type: bind\n'
+                printf "        source: '%s'\n" "$quoted_source"
+                printf "        target: '%s'\n" "$quoted_target"
+            done
+        fi
+
+        if [[ ${#EXTRA_MOUNT_SOURCES[@]} -gt 0 ]]; then
+            for index in "${!EXTRA_MOUNT_SOURCES[@]}"; do
+                quoted_source="$(yaml_single_quote "${EXTRA_MOUNT_SOURCES[$index]}")"
+                quoted_target="$(yaml_single_quote "${EXTRA_MOUNT_TARGETS[$index]}")"
                 printf '      - type: bind\n'
                 printf "        source: '%s'\n" "$quoted_source"
                 printf "        target: '%s'\n" "$quoted_target"
@@ -747,6 +760,63 @@ configure_automatic_ssh_agent_forwarding() {
         # ~/.claude.json needs no mount of its own: CLAUDE_CONFIG_DIR (see
         # docker_exec_base) keeps Claude's config inside the mounted .claude dir.
     }
+
+# Tools that key their state off the current directory (Claude Code files its
+# sessions under a slug of it) see the same path in every container when every
+# repo is mounted at /workspace. Mount the repo a second time under a per-repo
+# path and run shells there; /workspace stays as it was.
+configure_repo_alias_mount() {
+    local parent repo_name alias_path registry owner
+
+    REPO_ALIAS_FOLDER=""
+
+    if [[ "${DEVENV_NO_REPO_ALIAS:-0}" == "1" ]]; then
+        return
+    fi
+
+    repo_name="$(basename "$PROJECT_ROOT")"
+    parent="${DEVENV_REPO_ALIAS_PARENT:-/repos}"
+
+    # The workspace folder is already per-repo (the default when the repo config
+    # omits one), so a second mount would buy nothing. A repo folder named
+    # 'workspace' mounted at /workspace does not count: that path is shared by
+    # every other repo too.
+    if [[ "$WORKSPACE_FOLDER" == */"$repo_name" && "$(dirname "$WORKSPACE_FOLDER")" != "/" ]]; then
+        return
+    fi
+
+    # 'docker --mount' takes comma-separated key=value pairs, so a repo folder
+    # with a comma in its name cannot be expressed as a target.
+    if [[ "$repo_name" == *,* ]]; then
+        print_warning "Skipping the per-repo path: '$repo_name' contains a comma."
+        return
+    fi
+
+    # Two checkouts with the same folder name would otherwise land on the same
+    # per-repo path and mix again, which is the problem this exists to avoid.
+    registry="${XDG_STATE_HOME:-$HOME/.local/state}/devenv/repo-aliases"
+    alias_path="${parent%/}/$repo_name"
+    owner="$(awk -F'\t' -v alias="$alias_path" '$1 == alias { print $2; exit }' "$registry" 2>/dev/null || true)"
+
+    if [[ -n "$owner" && "$owner" != "$PROJECT_ROOT" ]]; then
+        alias_path="${parent%/}/$repo_name-$PROJECT_HASH"
+    elif [[ -z "$owner" ]]; then
+        mkdir -p "$(dirname "$registry")"
+        printf '%s\t%s\n' "$alias_path" "$PROJECT_ROOT" >> "$registry"
+    fi
+
+    if [[ "$alias_path" == "$WORKSPACE_FOLDER" ]]; then
+        return
+    fi
+
+    REPO_ALIAS_FOLDER="$alias_path"
+    EXTRA_MOUNT_SOURCES+=("$PROJECT_ROOT")
+    EXTRA_MOUNT_TARGETS+=("$alias_path")
+
+    if [[ "$SCENARIO" == "dockerfile" ]]; then
+        MOUNT_ARGS+=("--mount=type=bind,source=$PROJECT_ROOT,target=$alias_path")
+    fi
+}
 
 field_type() {
     local field="$1"
@@ -996,6 +1066,7 @@ load_workspace_context() {
 
     configure_automatic_ssh_agent_forwarding
     configure_automatic_host_dir_mounts
+    configure_repo_alias_mount
     configure_forward_ports
     write_compose_runtime_override
 }
@@ -2511,7 +2582,7 @@ docker_exec_base() {
         command+=(-e "CLAUDE_CONFIG_DIR=${DEVENV_CLAUDE_CONFIG_DIR:-$(container_home_dir)/.claude}")
     fi
     command+=("${remote_env_args[@]}")
-    command+=(-w "$WORKSPACE_FOLDER" "$container_id")
+    command+=(-w "$(repo_exec_dir "$container_id")" "$container_id")
     printf '%s\0' "${command[@]}"
 }
 
@@ -2756,9 +2827,13 @@ prune_creation_markers() {
     local marker marker_container_id
 
     shopt -s nullglob
-    for marker in "$PROJECT_STATE_DIR"/*.done; do
+    for marker in "$PROJECT_STATE_DIR"/*.done "$PROJECT_STATE_DIR"/repo-alias-missing.*; do
         marker_container_id="$(basename "$marker")"
-        marker_container_id="${marker_container_id%%.*}"
+        if [[ "$marker_container_id" == repo-alias-missing.* ]]; then
+            marker_container_id="${marker_container_id#repo-alias-missing.}"
+        else
+            marker_container_id="${marker_container_id%%.*}"
+        fi
 
         if [[ "$marker_container_id" == "$active_container_id" ]]; then
             continue
@@ -2793,6 +2868,56 @@ run_start_lifecycle() {
 run_attach_lifecycle() {
     local container_id="$1"
     run_container_command "$container_id" postAttachCommand
+}
+
+# A container created before the per-repo mount existed will not have that path.
+# Fall back to the workspace folder instead of failing every exec.
+verify_repo_alias_mount() {
+    local container_id="$1"
+    local attempt
+    local ready=0
+
+    [[ -n "$REPO_ALIAS_FOLDER" ]] || return 0
+
+    # Runs before wait_for_exec_ready, so wait for exec to work first; that
+    # readiness check runs in the per-repo path and would otherwise time out on
+    # a container that has no such path.
+    for ((attempt = 1; attempt <= 25; attempt++)); do
+        if docker exec "$container_id" /bin/sh -c 'exit 0' >/dev/null 2>&1; then
+            ready=1
+            break
+        fi
+        sleep 0.2
+    done
+
+    [[ $ready -eq 1 ]] || return 0
+
+    if docker exec "$container_id" /bin/sh -c "test -d $(shell_escape "$REPO_ALIAS_FOLDER")" >/dev/null 2>&1; then
+        rm -f "$(repo_alias_marker "$container_id")"
+        return 0
+    fi
+
+    if [[ ! -f "$(repo_alias_marker "$container_id")" ]]; then
+        print_warning "Container predates the per-repo path '$REPO_ALIAS_FOLDER'. Using '$WORKSPACE_FOLDER'. Recreate the environment ('devenv down' then 'devenv up') to pick it up."
+    fi
+    : > "$(repo_alias_marker "$container_id")"
+}
+
+repo_alias_marker() {
+    printf '%s/repo-alias-missing.%s' "$PROJECT_STATE_DIR" "$1"
+}
+
+# The exec directory, honouring a container that predates the per-repo mount.
+# Recorded on disk because verify_repo_alias_mount often runs in a subshell.
+repo_exec_dir() {
+    local container_id="$1"
+
+    if [[ -z "$REPO_ALIAS_FOLDER" || -f "$(repo_alias_marker "$container_id")" ]]; then
+        printf '%s' "$WORKSPACE_FOLDER"
+        return
+    fi
+
+    printf '%s' "$REPO_ALIAS_FOLDER"
 }
 
 wait_for_exec_ready() {
@@ -2911,6 +3036,7 @@ start_stack() {
 
     current_container_id="$(ensure_service_container)"
     prune_creation_markers "$current_container_id"
+    verify_repo_alias_mount "$current_container_id"
     wait_for_exec_ready "$current_container_id"
 
     # When host directories are bind-mounted into the container Docker may
@@ -3007,6 +3133,7 @@ ensure_running() {
         start_stack
         container_id="$(ensure_service_container)"
     fi
+    verify_repo_alias_mount "$container_id"
     wait_for_exec_ready "$container_id"
     printf '%s\n' "$container_id"
 }
@@ -3584,6 +3711,7 @@ Project name:     $PROJECT_NAME
 Primary service:  $SERVICE_NAME
 Remote user:      ${REMOTE_USER:-<container default>}
 Workspace folder: $WORKSPACE_FOLDER
+Repo path:        ${REPO_ALIAS_FOLDER:-$WORKSPACE_FOLDER}
 SSH agent:        $(if [[ $AUTO_SSH_AGENT_FORWARDING -eq 1 ]]; then printf 'auto -> %s' "$AUTO_SSH_AGENT_TARGET"; else printf 'disabled'; fi)
 Host dotdirs:     $(if [[ ${#AUTO_HOST_MOUNT_SOURCES[@]} -gt 0 ]]; then printf '%s' "${AUTO_HOST_MOUNT_SOURCES[*]}"; else printf 'none'; fi)
 Forward ports:    $(if [[ ${#FORWARD_PORTS[@]} -gt 0 ]]; then printf '%s' "${FORWARD_PORTS[*]}"; else printf 'none'; fi)
