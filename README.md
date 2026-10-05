@@ -340,6 +340,8 @@ If `SSH_AUTH_SOCK` exists on the host, `devenv` now forwards it automatically fo
 
 If you do not want that behavior for a session, run `devenv` with `DEVENV_NO_SSH_AGENT_FORWARDING=1`.
 
+If `~/.ssh/known_hosts` exists on the host, `devenv` also mounts it read-only at `/etc/ssh/ssh_known_hosts`, the system-wide list ssh reads by default. Hosts you already trust on the host are trusted in the container without another prompt, and the container's own `~/.ssh/known_hosts` stays writable for hosts first seen there. Set `DEVENV_NO_SSH_KNOWN_HOSTS=1` to turn this off; a repo that mounts its own `.ssh` or `known_hosts` is left alone. Hosts ssh adds on the host later show up in the container right away. A tool that rewrites the file instead, such as `ssh-keygen -R`, leaves the container on the old copy until `devenv down` and `devenv up` recreate it.
+
 If `~/.copilot`, `~/.gemini`, `~/.opencode`, or `~/.local/share/opencode` exist on the host, `devenv` also mounts them automatically into the container user's home directory at the matching paths, unless the repo already defines its own mount for those paths.
 
 If you do not want that behavior for a session, run `devenv` with `DEVENV_NO_HOST_DOTDIR_FORWARDING=1`.

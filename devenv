@@ -52,6 +52,8 @@ BUILD_CONTEXT_PATH=""
 AUTO_SSH_AGENT_FORWARDING=0
 AUTO_SSH_AGENT_SOURCE=""
 AUTO_SSH_AGENT_TARGET="/tmp/devenv-ssh-agent.sock"
+AUTO_SSH_KNOWN_HOSTS_SOURCE=""
+AUTO_SSH_KNOWN_HOSTS_TARGET="/etc/ssh/ssh_known_hosts"
 AUTO_HOST_DOTDIR_MOUNTING=0
 COMPOSE_RUNTIME_OVERRIDE=""
 DEV_SESSION_LAYOUT=""
@@ -618,7 +620,7 @@ write_compose_runtime_override() {
         return
     fi
 
-    if [[ $AUTO_SSH_AGENT_FORWARDING -eq 0 && ${#FORWARD_PORTS[@]} -eq 0 && ${#AUTO_HOST_MOUNT_SOURCES[@]} -eq 0 && ${#EXTRA_MOUNT_SOURCES[@]} -eq 0 ]]; then
+    if [[ $AUTO_SSH_AGENT_FORWARDING -eq 0 && -z "$AUTO_SSH_KNOWN_HOSTS_SOURCE" && ${#FORWARD_PORTS[@]} -eq 0 && ${#AUTO_HOST_MOUNT_SOURCES[@]} -eq 0 && ${#EXTRA_MOUNT_SOURCES[@]} -eq 0 ]]; then
         return
     fi
 
@@ -635,13 +637,22 @@ write_compose_runtime_override() {
             printf "      SSH_AUTH_SOCK: '%s'\n" "$quoted_target"
         fi
 
-        if [[ $AUTO_SSH_AGENT_FORWARDING -eq 1 || ${#AUTO_HOST_MOUNT_SOURCES[@]} -gt 0 || ${#EXTRA_MOUNT_SOURCES[@]} -gt 0 ]]; then
+        if [[ $AUTO_SSH_AGENT_FORWARDING -eq 1 || -n "$AUTO_SSH_KNOWN_HOSTS_SOURCE" || ${#AUTO_HOST_MOUNT_SOURCES[@]} -gt 0 || ${#EXTRA_MOUNT_SOURCES[@]} -gt 0 ]]; then
             printf '    volumes:\n'
         fi
 
         if [[ $AUTO_SSH_AGENT_FORWARDING -eq 1 ]]; then
             quoted_source="$(yaml_single_quote "$AUTO_SSH_AGENT_SOURCE")"
             quoted_target="$(yaml_single_quote "$AUTO_SSH_AGENT_TARGET")"
+            printf '      - type: bind\n'
+            printf "        source: '%s'\n" "$quoted_source"
+            printf "        target: '%s'\n" "$quoted_target"
+            printf '        read_only: true\n'
+        fi
+
+        if [[ -n "$AUTO_SSH_KNOWN_HOSTS_SOURCE" ]]; then
+            quoted_source="$(yaml_single_quote "$AUTO_SSH_KNOWN_HOSTS_SOURCE")"
+            quoted_target="$(yaml_single_quote "$AUTO_SSH_KNOWN_HOSTS_TARGET")"
             printf '      - type: bind\n'
             printf "        source: '%s'\n" "$quoted_source"
             printf "        target: '%s'\n" "$quoted_target"
@@ -716,6 +727,38 @@ configure_automatic_ssh_agent_forwarding() {
 
         if [[ "$SCENARIO" == "dockerfile" ]]; then
         MOUNT_ARGS+=("--mount=type=bind,source=$AUTO_SSH_AGENT_SOURCE,target=$AUTO_SSH_AGENT_TARGET,readonly")
+    fi
+}
+
+# Hand the host's known_hosts to ssh as the system-wide list rather than the
+# user's own: hosts trusted on the host are trusted in the container, and the
+# container's ~/.ssh/known_hosts stays writable for hosts first seen there.
+configure_automatic_ssh_known_hosts() {
+    local host_file="$HOME/.ssh/known_hosts"
+
+    AUTO_SSH_KNOWN_HOSTS_SOURCE=""
+
+    if [[ "${DEVENV_NO_SSH_KNOWN_HOSTS:-0}" == "1" ]]; then
+        return
+    fi
+
+    if [[ ! -f "$host_file" ]]; then
+        return
+    fi
+
+    # 'docker --mount' takes comma-separated key=value pairs.
+    if [[ "$host_file" == *,* ]]; then
+        return
+    fi
+
+    if devcontainer_has_explicit_host_dir_config ".ssh" || devcontainer_has_explicit_host_dir_config "known_hosts"; then
+        return
+    fi
+
+    AUTO_SSH_KNOWN_HOSTS_SOURCE="$host_file"
+
+    if [[ "$SCENARIO" == "dockerfile" ]]; then
+        MOUNT_ARGS+=("--mount=type=bind,source=$AUTO_SSH_KNOWN_HOSTS_SOURCE,target=$AUTO_SSH_KNOWN_HOSTS_TARGET,readonly")
     fi
 }
 
@@ -1065,6 +1108,7 @@ load_workspace_context() {
     fi
 
     configure_automatic_ssh_agent_forwarding
+    configure_automatic_ssh_known_hosts
     configure_automatic_host_dir_mounts
     configure_repo_alias_mount
     configure_forward_ports
@@ -3713,6 +3757,7 @@ Remote user:      ${REMOTE_USER:-<container default>}
 Workspace folder: $WORKSPACE_FOLDER
 Repo path:        ${REPO_ALIAS_FOLDER:-$WORKSPACE_FOLDER}
 SSH agent:        $(if [[ $AUTO_SSH_AGENT_FORWARDING -eq 1 ]]; then printf 'auto -> %s' "$AUTO_SSH_AGENT_TARGET"; else printf 'disabled'; fi)
+SSH known hosts:  $(if [[ -n "$AUTO_SSH_KNOWN_HOSTS_SOURCE" ]]; then printf 'auto -> %s' "$AUTO_SSH_KNOWN_HOSTS_TARGET"; else printf 'disabled'; fi)
 Host dotdirs:     $(if [[ ${#AUTO_HOST_MOUNT_SOURCES[@]} -gt 0 ]]; then printf '%s' "${AUTO_HOST_MOUNT_SOURCES[*]}"; else printf 'none'; fi)
 Forward ports:    $(if [[ ${#FORWARD_PORTS[@]} -gt 0 ]]; then printf '%s' "${FORWARD_PORTS[*]}"; else printf 'none'; fi)
 EOF
