@@ -340,9 +340,23 @@ If `SSH_AUTH_SOCK` exists on the host, `devenv` now forwards it automatically fo
 
 If you do not want that behavior for a session, run `devenv` with `DEVENV_NO_SSH_AGENT_FORWARDING=1`.
 
+If `~/.ssh/known_hosts` exists on the host, `devenv` also mounts it read-only at `/etc/ssh/ssh_known_hosts`, the system-wide list ssh reads by default. Hosts you already trust on the host are trusted in the container without another prompt, and the container's own `~/.ssh/known_hosts` stays writable for hosts first seen there. Set `DEVENV_NO_SSH_KNOWN_HOSTS=1` to turn this off; a repo that mounts its own `.ssh` or `known_hosts` is left alone. Hosts ssh adds on the host later show up in the container right away. A tool that rewrites the file instead, such as `ssh-keygen -R`, leaves the container on the old copy until `devenv down` and `devenv up` recreate it.
+
 If `~/.copilot`, `~/.gemini`, `~/.opencode`, or `~/.local/share/opencode` exist on the host, `devenv` also mounts them automatically into the container user's home directory at the matching paths, unless the repo already defines its own mount for those paths.
 
 If you do not want that behavior for a session, run `devenv` with `DEVENV_NO_HOST_DOTDIR_FORWARDING=1`.
+
+## Per-Repo Path Inside The Container
+
+Most repos mount at `/workspace`, so every container shows the same current directory. Tools that key their state off that directory cannot tell the repos apart: Claude Code, for example, files its sessions, history, and todos under a slug of the current directory, so every repo shares one `~/.claude/projects/-workspace` bucket.
+
+`devenv` therefore mounts the repo a second time at `/repos/<repo-name>` and starts shells, `exec`, and tool commands there. Both paths are the same files on the same host folder, so `/workspace` keeps working for Dockerfiles, scripts, and anything else that hardcodes it.
+
+Set `DEVENV_REPO_ALIAS_PARENT` to use a parent other than `/repos`, or `DEVENV_NO_REPO_ALIAS=1` to turn the second mount off and go back to starting in the workspace folder.
+
+Two details worth knowing. A repo whose config omits `workspaceFolder` already gets a per-repo path (`/workspaces/<repo-name>`), so no second mount is added. And when two checkouts share a folder name, the second one gets `/repos/<repo-name>-<hash>` so the two do not collapse back into one; `devenv config` prints the path each repo ends up with.
+
+Containers created before this existed do not have the second path. `devenv` detects that, warns once, and starts in the workspace folder; `devenv down` followed by `devenv up` recreates the container with the second mount.
 
 Mounting all of `~/.ssh` still works, but it is broader than necessary. The safer manual setup is to forward your SSH agent socket explicitly in the repo config.
 
